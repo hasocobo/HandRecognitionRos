@@ -19,127 +19,205 @@ Control a robot using hand gestures detected via webcam. Uses a **handlebar anal
 
 ---
 
+## Architecture
+
+The project supports two modes of operation:
+
+### Mode 1: Direct ROS2 Node (Traditional)
+
+Camera → ROS2 Node → `/cmd_vel` → Robot
+
+### Mode 2: Client-Server Architecture (Recommended for Remote Control)
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  CLIENT (User Laptop)                                                │
+│  ┌─────────┐   ┌─────────────┐   ┌─────────────┐   ┌──────────────┐ │
+│  │ Camera/ │ → │ Frame Gate  │ → │ MediaPipe   │ → │ Hand Control │ │
+│  │ RTSP    │   │ (validate)  │   │ Hands       │   │ Logic        │ │
+│  └─────────┘   └─────────────┘   └─────────────┘   └──────────────┘ │
+│                                                           │          │
+│                                          ┌────────────────┘          │
+│                                          ▼                           │
+│                                   ┌──────────────┐                   │
+│                                   │ JSON Message │                   │
+│                                   │ Validator    │                   │
+│                                   └──────────────┘                   │
+│                                          │                           │
+└──────────────────────────────────────────│───────────────────────────┘
+                                           │ WebSocket
+                                           ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  SERVER (Robot Machine)                                              │
+│  ┌──────────────┐                                                    │
+│  │ WS Server    │ ──┬──→ ROS2 Bridge ──→ /cmd_vel ──→ Robot         │
+│  │ (auth+lock)  │   │                                                │
+│  └──────────────┘   └──→ MQTT Bridge ──→ ESP32 ──→ Motors           │
+│                                                                      │
+│  Deadman Timer: Auto-stop if no message for 300ms                   │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Safety Features:**
+- Frame quality gate: Corrupted/missing RTSP frames do NOT produce commands
+- Hand quality gate: Both hands must be visible and calibrated
+- Message validation: NaN/Inf/out-of-bounds values are rejected
+- Deadman timer: Server stops robot if client goes silent
+
+---
+
 ## 📦 Project Structure
 
 ```
 HandGestureRos/
-├── HandRecognition/           # Hand gesture detection ROS2 package
+├── client_hand_control/       # Standalone client (NO ROS2)
+│   ├── main.py               # CLI entry point
+│   ├── frame_gate.py         # Frame quality validation
+│   ├── hand_control.py       # Handlebar control logic
+│   ├── message.py            # JSON schema + validation
+│   ├── ws_client.py          # WebSocket client
+│   └── requirements.txt
+│
+├── server_gateway/            # ROS2 + MQTT gateway server
+│   ├── main.py               # Server entry point
+│   ├── ws_server.py          # WebSocket server + auth
+│   ├── ros_bridge.py         # ROS2 publishers + deadman
+│   ├── mqtt_bridge.py        # MQTT for ESP32
+│   └── requirements.txt
+│
+├── HandRecognition/           # Original ROS2 node (direct mode)
 │   ├── hand_recognition/
-│   │   └── hand_drive_node.py # Main ROS2 node
-│   └── hand_drive.py          # Standalone demo script
+│   │   └── hand_drive_node.py
+│   └── hand_drive.py         # Standalone demo
 │
 └── hand-gesture-robot/        # Robot control package
-    ├── launch/                # ROS2 launch files
-    ├── config/                # Robot parameters
-    ├── firmware/              # ESP32 + Arduino code
-    ├── README.md              # Detailed documentation
-    └── SETUP_GUIDE.md         # Step-by-step setup
+    ├── launch/
+    ├── config/
+    └── firmware/             # ESP32 + Arduino code
 ```
 
 ---
 
-## 🚀 Quick Installation
+## 🚀 Quick Start
 
 ### Prerequisites
 
 | Requirement | Version |
 |-------------|---------|
-| Ubuntu | 24.04 (Noble Numbat) |
-| ROS2 | Jazzy Jalisco |
+| Ubuntu | 22.04+ or macOS |
 | Python | 3.10+ |
-| Webcam | Any USB webcam |
+| ROS2 (server only) | Jazzy/Humble |
+| Webcam | Any USB webcam or RTSP stream |
 
-### Step 1: Install ROS2 Jazzy
+### Installation
+
+#### Client (User Laptop - No ROS2 Needed)
 
 ```bash
-# Update system
-sudo apt update && sudo apt upgrade -y
-
-# Set locale
-sudo apt install locales
-sudo locale-gen en_US en_US.UTF-8
-sudo update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
-export LANG=en_US.UTF-8
-
-# Add ROS2 repository
-sudo apt install software-properties-common curl -y
-sudo add-apt-repository universe
-sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
-
-# Install ROS2 Jazzy Desktop
-sudo apt update
-sudo apt install ros-jazzy-desktop python3-argcomplete python3-colcon-common-extensions -y
-
-# Add to bashrc
-echo "source /opt/ros/jazzy/setup.bash" >> ~/.bashrc
-source ~/.bashrc
+cd client_hand_control
+pip install -r requirements.txt
 ```
 
-### Step 2: Install Python Dependencies
+#### Server (Robot Machine - Needs ROS2)
 
 ```bash
-pip3 install numpy opencv-python mediapipe
-```
+# Install ROS2 dependencies
+sudo apt install ros-jazzy-desktop python3-colcon-common-extensions -y
 
-### Step 3: Create ROS2 Workspace & Build
+# Install server dependencies
+cd server_gateway
+pip install -r requirements.txt
 
-```bash
-# Create workspace
-mkdir -p ~/ros2_ws/src
-cd ~/ros2_ws/src
-
-# Clone or symlink this repository
-git clone <your-repo-url> HandGestureRos
-# Or if you already have it:
-# ln -s /path/to/HandGestureRos .
-
-# Create symlinks to packages (required for ROS2)
-ln -s HandGestureRos/HandRecognition hand_recognition
-ln -s HandGestureRos/hand-gesture-robot hand_gesture_robot
-
-# Build
+# Build ROS2 workspace
 cd ~/ros2_ws
-colcon build --symlink-install
-
-# Source workspace
-echo "source ~/ros2_ws/install/setup.bash" >> ~/.bashrc
-source ~/.bashrc
-```
-
-### Step 4: Verify Installation
-
-```bash
-# Check packages are found
-ros2 pkg list | grep -E "hand_recognition|hand_gesture"
-
-# Should output:
-# hand_gesture_robot
-# hand_recognition
+ln -s /path/to/HandGestureRos/server_gateway src/
+colcon build --packages-select server_gateway
+source install/setup.bash
 ```
 
 ---
 
 ## 🎮 Running the System
 
-### Option 1: Launch File (Recommended)
+### Local Testing (All on One Machine)
 
+**Terminal 1: Start MQTT Broker (Optional)**
 ```bash
-ros2 launch hand_gesture_robot full_system.launch.py
+# Only needed if using MQTT bridge to ESP32
+mosquitto -v
 ```
 
-### Option 2: Run Node Directly
+**Terminal 2: Start Server Gateway**
+```bash
+cd /path/to/HandGestureRos
+export CONTROL_TOKEN=test123
+python -m server_gateway.main
+```
+
+**Terminal 3: Start Client**
+```bash
+cd /path/to/HandGestureRos
+
+# With local webcam
+python -m client_hand_control.main \
+    --server ws://127.0.0.1:8080/control \
+    --token test123 \
+    --camera 0 \
+    --preview
+
+# Or with RTSP stream
+python -m client_hand_control.main \
+    --server ws://127.0.0.1:8080/control \
+    --token test123 \
+    --rtsp "rtsp://10.8.34.150:8554/handcam" \
+    --preview
+```
+
+**Terminal 4: Verify ROS2 Output**
+```bash
+source /opt/ros/jazzy/setup.bash
+ros2 topic echo /cmd_vel
+ros2 topic echo /drive_enabled
+```
+
+### Direct ROS2 Mode (Original)
 
 ```bash
+# Launch with ROS2
+ros2 launch hand_gesture_robot full_system.launch.py
+
+# Or run node directly
 ros2 run hand_recognition hand_drive_node
 ```
 
-### Option 3: Standalone Demo (No ROS2)
+---
 
-```bash
-cd HandRecognition
-python3 hand_drive.py
-```
+## 🛠️ Configuration
+
+### Client CLI Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--server` | `ws://127.0.0.1:8080/control` | WebSocket server URL |
+| `--token` | (required) | Authentication token |
+| `--camera` | `0` | Camera device index |
+| `--rtsp` | `None` | RTSP URL (overrides camera) |
+| `--max-linear` | `0.22` | Max linear velocity (m/s) |
+| `--max-angular` | `2.84` | Max angular velocity (rad/s) |
+| `--rate` | `30` | Control loop rate (Hz) |
+| `--preview` | `false` | Show camera preview window |
+| `--invalid-timeout` | `300` | Frame invalid timeout (ms) |
+
+### Server Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONTROL_TOKEN` | (required) | Client authentication token |
+| `DEADMAN_MS` | `300` | Deadman timeout (ms) |
+| `MAX_LINEAR` | `0.22` | Max linear velocity (m/s) |
+| `MAX_ANGULAR` | `2.84` | Max angular velocity (rad/s) |
+| `MQTT_HOST` | `localhost` | MQTT broker host |
+| `MQTT_PORT` | `1883` | MQTT broker port |
 
 ---
 
@@ -163,66 +241,78 @@ python3 hand_drive.py
 
 | Topic | Type | Description |
 |-------|------|-------------|
-| `/cmd_vel` | `geometry_msgs/Twist` | Velocity commands (linear.x, angular.z) |
+| `/cmd_vel` | `geometry_msgs/Twist` | Velocity commands |
 | `/drive_enabled` | `std_msgs/Bool` | Drive enable status |
-
-### Monitor Topics
-
-```bash
-# In another terminal
-ros2 topic echo /cmd_vel
-ros2 topic echo /drive_enabled
-ros2 topic hz /cmd_vel
-```
-
----
-
-## ⚙️ Launch Parameters
-
-```bash
-ros2 launch hand_gesture_robot hand_control.launch.py \
-    camera_id:=0 \
-    max_linear_vel:=0.22 \
-    max_angular_vel:=2.84 \
-    show_preview:=true
-```
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `camera_id` | `0` | Camera device ID |
-| `max_linear_vel` | `0.22` | Max forward speed (m/s) |
-| `max_angular_vel` | `2.84` | Max turn rate (rad/s) |
-| `show_preview` | `true` | Show camera window |
 
 ---
 
 ## 🔧 Troubleshooting
 
-### "ros2: command not found"
+### RTSP Stream Corruption
+
+If you see H264 decoder errors like "corrupted macroblock" or "Invalid level prefix":
+
+1. **Use TCP transport** (more reliable than UDP):
+   ```bash
+   --rtsp "rtsp://10.8.34.150:8554/handcam?rtsp_transport=tcp"
+   ```
+
+2. **Lower camera bitrate** to 2-4 Mbps
+
+3. **Reduce resolution** to 720p or lower
+
+4. **Expected behavior**: The frame gate will automatically drop corrupted frames. The robot will NOT receive incorrect commands from bad frames.
+
+### "Connection refused" Error
+
 ```bash
-source /opt/ros/jazzy/setup.bash
+# Make sure server is running first
+export CONTROL_TOKEN=test123
+python -m server_gateway.main
 ```
 
-### "Package not found"
-```bash
-cd ~/ros2_ws
-colcon build --symlink-install
-source install/setup.bash
-```
+### Camera Not Opening
 
-### Camera not opening
 ```bash
-# Check available cameras
+# List available cameras
 ls /dev/video*
 
-# Try different camera ID
-ros2 launch hand_gesture_robot hand_control.launch.py camera_id:=1
+# Try different camera index
+python -m client_hand_control.main --camera 1 --token test123 --preview
 ```
 
-### Python import errors
+### ROS2 Topics Not Publishing
+
 ```bash
-pip3 install --upgrade numpy opencv-python mediapipe
+# Check if ROS2 bridge is running
+ros2 node list | grep gateway
+
+# Check for errors in server output
+# Server will log "ROS bridge started" if successful
 ```
+
+### MQTT Connection Failed
+
+```bash
+# Start local MQTT broker
+mosquitto -v
+
+# Or disable MQTT (server will continue without it)
+# Just don't connect any ESP32 via MQTT
+```
+
+---
+
+## 🔒 Safety Features
+
+| Feature | Description |
+|---------|-------------|
+| **Frame Gate** | Drops corrupted/invalid camera frames |
+| **Hand Gate** | Requires both hands visible + calibrated |
+| **Message Validation** | Rejects NaN/Inf/out-of-bounds values |
+| **Deadman Timer** | Auto-stop if no message for 300ms |
+| **Single Controller Lock** | Only one client can control at a time |
+| **Graceful Shutdown** | Sends STOP on client disconnect |
 
 ---
 
@@ -230,10 +320,9 @@ pip3 install --upgrade numpy opencv-python mediapipe
 
 | Document | Description |
 |----------|-------------|
-| [hand-gesture-robot/README.md](hand-gesture-robot/README.md) | Detailed system documentation |
-| [hand-gesture-robot/SETUP_GUIDE.md](hand-gesture-robot/SETUP_GUIDE.md) | Complete step-by-step setup |
-| [hand-gesture-robot/HARDWARE_SETUP.md](hand-gesture-robot/HARDWARE_SETUP.md) | ESP32 + Arduino wiring guide |
-| [hand-gesture-robot/firmware/README.md](hand-gesture-robot/firmware/README.md) | Firmware documentation |
+| [hand-gesture-robot/README.md](hand-gesture-robot/README.md) | Robot hardware setup |
+| [hand-gesture-robot/SETUP_GUIDE.md](hand-gesture-robot/SETUP_GUIDE.md) | Complete setup guide |
+| [hand-gesture-robot/firmware/README.md](hand-gesture-robot/firmware/README.md) | ESP32/Arduino firmware |
 
 ---
 

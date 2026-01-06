@@ -1,0 +1,13 @@
+# Client Hand Control Dependencies
+# NO ROS2 DEPENDENCIES
+
+# Core
+numpy>=1.24.0
+opencv-python>=4.8.0
+
+# Hand detection
+mediapipe>=0.10.0
+
+# WebSocket client
+websockets>=12.0
+

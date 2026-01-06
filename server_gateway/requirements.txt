@@ -1,0 +1,14 @@
+# Server Gateway Dependencies
+
+# Web server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+
+# MQTT
+paho-mqtt>=1.6.0
+
+# Note: ROS2 dependencies (rclpy, geometry_msgs, std_msgs) 
+# come from the ROS2 installation, not pip.
+# The server will run without ROS if rclpy is not available.
+
