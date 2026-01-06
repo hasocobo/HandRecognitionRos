@@ -258,6 +258,7 @@ class HandDriveNode(Node):
         self.declare_parameter("max_linear_vel", 0.22)  # TurtleBot3 max: 0.22 m/s
         self.declare_parameter("max_angular_vel", 2.84)  # TurtleBot3 max: 2.84 rad/s
         self.declare_parameter("camera_id", 0)
+        self.declare_parameter("camera_url", "")
         self.declare_parameter("show_preview", True)
         self.declare_parameter("publish_rate", 15.0)  # Hz
 
@@ -278,17 +279,27 @@ class HandDriveNode(Node):
             self.get_parameter("publish_rate").get_parameter_value().double_value
         )
 
+        self.camera_url = self.get_parameter("camera_url").get_parameter_value().string_value
+
         # Publishers
         self.cmd_vel_pub = self.create_publisher(Twist, "cmd_vel", 10)
         self.drive_enabled_pub = self.create_publisher(Bool, "drive_enabled", 10)
 
-        # Initialize camera
-        self.cap = cv2.VideoCapture(self.camera_id)
-        if not self.cap.isOpened():
-            self.get_logger().error(f"Cannot open camera {self.camera_id}")
-            raise RuntimeError(f"Cannot open camera {self.camera_id}")
+        # Initialize camera (device index OR RTSP/URL)
+        if self.camera_url:
+            self.get_logger().info(f"Opening camera_url: {self.camera_url}")
+            self.cap = cv2.VideoCapture(self.camera_url, cv2.CAP_FFMPEG)
+            src = self.camera_url
+        else:
+            self.get_logger().info(f"Opening camera_id: {self.camera_id}")
+            self.cap = cv2.VideoCapture(self.camera_id)
+            src = str(self.camera_id)
 
-        self.get_logger().info(f"Camera {self.camera_id} opened successfully")
+        if not self.cap.isOpened():
+            self.get_logger().error(f"Cannot open camera source: {src}")
+            raise RuntimeError(f"Cannot open camera source: {src}")
+
+        self.get_logger().info(f"Camera source opened: {src}")
 
         # Initialize state
         self.state = DriveState()
