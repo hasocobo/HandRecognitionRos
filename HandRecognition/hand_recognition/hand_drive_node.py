@@ -465,6 +465,7 @@ class HandDriveNode(Node):
         self.declare_parameter("max_linear_vel", 0.22)  # TurtleBot3 max: 0.22 m/s
         self.declare_parameter("max_angular_vel", 2.84)  # TurtleBot3 max: 2.84 rad/s
         self.declare_parameter("camera_id", 0)
+        self.declare_parameter("camera_url", "")  # RTSP/HTTP URL; if set, overrides camera_id
         self.declare_parameter("show_preview", True)
         self.declare_parameter("publish_rate", 15.0)  # Hz
 
@@ -478,6 +479,9 @@ class HandDriveNode(Node):
         self.camera_id = (
             self.get_parameter("camera_id").get_parameter_value().integer_value
         )
+        self.camera_url = (
+            self.get_parameter("camera_url").get_parameter_value().string_value
+        )
         self.show_preview = (
             self.get_parameter("show_preview").get_parameter_value().bool_value
         )
@@ -489,13 +493,19 @@ class HandDriveNode(Node):
         self.cmd_vel_pub = self.create_publisher(Twist, "cmd_vel", 10)
         self.drive_enabled_pub = self.create_publisher(Bool, "drive_enabled", 10)
 
-        # Initialize camera
-        self.cap = cv2.VideoCapture(self.camera_id)
-        if not self.cap.isOpened():
-            self.get_logger().error(f"Cannot open camera {self.camera_id}")
-            raise RuntimeError(f"Cannot open camera {self.camera_id}")
+        # Initialize camera (camera_url overrides camera_id)
+        src = self.camera_url.strip() if isinstance(self.camera_url, str) else ""
+        if src:
+            self.cap = cv2.VideoCapture(src)
+        else:
+            src = str(self.camera_id)
+            self.cap = cv2.VideoCapture(self.camera_id)
 
-        self.get_logger().info(f"Camera {self.camera_id} opened successfully")
+        if not self.cap.isOpened():
+            self.get_logger().error(f"Cannot open camera source: {src}")
+            raise RuntimeError(f"Cannot open camera source: {src}")
+
+        self.get_logger().info(f"Camera source opened successfully: {src}")
 
         # Initialize state
         self.state = DriveState()
