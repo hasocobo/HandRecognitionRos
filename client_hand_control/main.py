@@ -69,7 +69,7 @@ class HandControlClient:
         rtsp_url: Optional[str] = None,
         max_linear: float = 0.22,
         max_angular: float = 2.84,
-        rate: float = 30.0,
+        rate: float = 15.0,  # 15 Hz is plenty for robot control
         show_preview: bool = False,
         invalid_timeout_ms: int = 300,
     ):
@@ -584,8 +584,8 @@ def main() -> None:
     parser.add_argument(
         "--rate",
         type=float,
-        default=30.0,
-        help="Control loop rate (Hz)",
+        default=15.0,
+        help="Control loop rate (Hz) - 15 Hz is recommended",
     )
     parser.add_argument(
         "--preview",

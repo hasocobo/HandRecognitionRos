@@ -182,9 +182,14 @@ class MQTTBridge:
         
         Converts (linear, angular) velocity to left/right PWM values.
         
+        Simple mixing:
+        - linear=max, angular=0  → left=255, right=255 (full forward)
+        - linear=0, angular=max  → left=255, right=-255 (spin right)
+        - linear=max, angular=max → left=255, right=0 (sharp right turn)
+        
         Args:
             linear: Linear velocity (m/s), positive = forward
-            angular: Angular velocity (rad/s), positive = counter-clockwise
+            angular: Angular velocity (rad/s), positive = turn left
             
         Returns:
             True if published successfully
@@ -192,21 +197,20 @@ class MQTTBridge:
         if not self._connected or not self._client:
             return False
             
-        # Differential drive kinematics
-        # v_left = linear - (angular * wheel_base / 2)
-        # v_right = linear + (angular * wheel_base / 2)
+        # Normalize to -1..1
+        linear_pct = linear / self.max_linear if self.max_linear > 0 else 0.0
+        angular_pct = angular / self.max_angular if self.max_angular > 0 else 0.0
         
-        v_left = linear - (angular * self.wheel_base / 2)
-        v_right = linear + (angular * self.wheel_base / 2)
+        # Clamp inputs
+        linear_pct = max(-1.0, min(1.0, linear_pct))
+        angular_pct = max(-1.0, min(1.0, angular_pct))
         
-        # Normalize to -1..1 based on max velocities
-        # Max wheel velocity = max_linear + (max_angular * wheel_base / 2)
-        max_wheel_vel = self.max_linear + (self.max_angular * self.wheel_base / 2)
+        # Simple differential mixing
+        # Positive angular = turn left = right wheel faster
+        left_norm = linear_pct - angular_pct
+        right_norm = linear_pct + angular_pct
         
-        left_norm = v_left / max_wheel_vel if max_wheel_vel > 0 else 0.0
-        right_norm = v_right / max_wheel_vel if max_wheel_vel > 0 else 0.0
-        
-        # Clamp to -1..1
+        # Clamp outputs to -1..1
         left_norm = max(-1.0, min(1.0, left_norm))
         right_norm = max(-1.0, min(1.0, right_norm))
         

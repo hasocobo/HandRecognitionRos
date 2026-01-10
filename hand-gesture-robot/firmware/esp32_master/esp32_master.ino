@@ -1,161 +1,176 @@
 /*
- * ESP32 Master Node for TurtleBot Control
- * 
- * This code runs on ESP32 and:
- * 1. Connects to micro-ROS agent (via Serial or WiFi)
- * 2. Subscribes to /cmd_vel topic
- * 3. Sends motor commands to Arduino via Serial
- * 
- * Hardware:
- * - ESP32 Development Board
- * - Serial2 connection to Arduino:
- *   - ESP32 GPIO 17 (TX2) → Arduino RX
- *   - ESP32 GPIO 16 (RX2) → Arduino TX (optional, if Arduino sends data back)
- *   - GND → GND
- * 
- * Dependencies:
- * - micro-ROS library for ESP32
- * - WiFi library (if using WiFi transport)
- */
-
-#include <micro_ros_arduino.h>
-#include <rcl/rcl.h>
-#include <rcl/error_handling.h>
-#include <rclc/rclc.h>
-#include <rclc/executor.h>
-#include <geometry_msgs/msg/twist.h>
-#include <std_msgs/msg/bool.h>
-
-// ========== Configuration ==========
-// WiFi Configuration (if using WiFi transport)
-#define WIFI_SSID "your_wifi_ssid"
-#define WIFI_PASSWORD "your_wifi_password"
-
-// Serial Configuration
-#define SERIAL_BAUD 115200
-
-// Hardware Serial for Arduino communication (Serial2 uses GPIO 16/17)
-// If using Serial for micro-ROS, use Serial2 for Arduino
-// If using WiFi for micro-ROS, can use Serial for Arduino
-#define ARDUINO_SERIAL Serial2  // Use Serial2 for Arduino communication
-
-// micro-ROS Configuration
-#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){error_loop();}}
-#define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){}}
-
-// ========== Global Variables ==========
-rcl_subscription_t subscriber;
-geometry_msgs__msg__Twist msg;
-rclc_executor_t executor;
-rclc_support_t support;
-rcl_allocator_t allocator;
-rcl_node_t node;
-rcl_timer_t timer;
-
-// Last command time for timeout detection
-unsigned long last_cmd_time = 0;
-const unsigned long CMD_TIMEOUT_MS = 1000; // Stop motors if no command for 1 second
-
-// ========== Function Declarations ==========
-void error_loop();
-void subscription_callback(const void *msgin);
-void setup();
-void loop();
-
-// ========== Error Handler ==========
-void error_loop() {
-  while(1) {
-    delay(100);
-  }
-}
-
-// ========== Subscription Callback ==========
-void subscription_callback(const void *msgin) {
-  const geometry_msgs__msg__Twist *twist_msg = (const geometry_msgs__msg__Twist *)msgin;
+  Hand Gesture Robot - ESP32 MASTER
   
-  // Update last command time
-  last_cmd_time = millis();
+  Receives MQTT commands from server: {"left": -255..255, "right": -255..255}
+  Forwards to Arduino via Serial:     <L:xxx,R:yyy>
   
-  // Extract linear and angular velocities
-  float linear_vel = twist_msg->linear.x;
-  float angular_vel = twist_msg->angular.z;
-  
-  // Send to Arduino via Serial2 (Hardware Serial)
-  // Format: "<linear_vel>,<angular_vel>\n"
-  ARDUINO_SERIAL.print(linear_vel, 3);
-  ARDUINO_SERIAL.print(",");
-  ARDUINO_SERIAL.print(angular_vel, 3);
-  ARDUINO_SERIAL.print("\n");
-  
-  // Debug output (optional)
-  // Serial.printf("Received: linear=%.3f, angular=%.3f\n", linear_vel, angular_vel);
-}
+  Wiring:
+    ESP32 TX2 (GPIO17) -> Arduino RX
+    ESP32 RX2 (GPIO16) -> Arduino TX
+    ESP32 GND          -> Arduino GND
+*/
 
-// ========== Setup ==========
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+
+// ============== CONFIGURATION ==============
+// WiFi
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
+
+// MQTT Server (your EC2 public IP)
+const char* MQTT_SERVER = "YOUR_EC2_PUBLIC_IP";
+const int MQTT_PORT = 1883;
+const char* MQTT_TOPIC_CMD = "robot/cmd";
+const char* MQTT_TOPIC_TELEMETRY = "robot/telemetry";
+
+// Serial to Arduino (Hardware Serial2)
+#define ARDUINO_SERIAL Serial2
+const int ARDUINO_RX = 16;  // ESP32 RX2
+const int ARDUINO_TX = 17;  // ESP32 TX2
+const long ARDUINO_BAUD = 115200;
+
+// Safety
+const unsigned long TIMEOUT_MS = 500;
+const unsigned long TELEMETRY_INTERVAL_MS = 5000;
+
+// ============================================
+
+WiFiClient wifiClient;
+PubSubClient mqtt(wifiClient);
+
+unsigned long lastCommandTime = 0;
+unsigned long lastTelemetryTime = 0;
+int lastLeft = 0;
+int lastRight = 0;
+bool motorsRunning = false;
+
 void setup() {
-  // Initialize Serial2 for Arduino communication (GPIO 16=RX, 17=TX)
-  ARDUINO_SERIAL.begin(SERIAL_BAUD);
+  // Debug serial
+  Serial.begin(115200);
+  Serial.println("\n=== ESP32 MQTT-Arduino Bridge ===");
   
-  // Initialize Serial for micro-ROS (USB Serial)
-  Serial.begin(SERIAL_BAUD);
+  // Arduino serial
+  ARDUINO_SERIAL.begin(ARDUINO_BAUD, SERIAL_8N1, ARDUINO_RX, ARDUINO_TX);
+  Serial.println("✓ Arduino Serial initialized");
   
-  // Set micro-ROS transport
-  // Option 1: Serial transport (USB) - uses Serial
-  set_microros_transports();
+  // WiFi
+  connectWiFi();
   
-  // Option 2: WiFi transport (uncomment if using WiFi) - then can use Serial for Arduino
-  // set_microros_wifi_transports(WIFI_SSID, WIFI_PASSWORD, "192.168.1.100", 8888);
-  // If using WiFi, change ARDUINO_SERIAL to Serial above
+  // MQTT
+  mqtt.setServer(MQTT_SERVER, MQTT_PORT);
+  mqtt.setCallback(onMqttMessage);
+  mqtt.setBufferSize(256);
   
-  delay(2000);
-  
-  // Allocate memory
-  allocator = rcl_get_default_allocator();
-  
-  // Create init_options
-  RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
-  
-  // Create node
-  RCCHECK(rclc_node_init_default(&node, "esp32_turtlebot_controller", "", &support));
-  
-  // Create subscriber
-  RCCHECK(rclc_subscription_init_default(
-    &subscriber,
-    &node,
-    ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
-    "/cmd_vel"));
-  
-  // Create executor
-  RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
-  RCCHECK(rclc_executor_add_subscription(&executor, &subscriber, &msg, &subscription_callback, ON_NEW_DATA));
-  
-  // Initialize message
-  msg.linear.x = 0.0;
-  msg.linear.y = 0.0;
-  msg.linear.z = 0.0;
-  msg.angular.x = 0.0;
-  msg.angular.y = 0.0;
-  msg.angular.z = 0.0;
-  
-  // Initialize last command time
-  last_cmd_time = millis();
-  
-  Serial.println("ESP32 TurtleBot Controller initialized");
-  Serial.println("Waiting for micro-ROS agent...");
+  // Send initial stop to Arduino
+  sendToArduino(0, 0);
 }
 
-// ========== Main Loop ==========
 void loop() {
-  // Spin executor to process incoming messages
-  RCSOFTCHECK(rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)));
+  // Maintain MQTT connection
+  if (!mqtt.connected()) {
+    reconnectMqtt();
+  }
+  mqtt.loop();
   
-  // Safety: Stop motors if no command received for timeout period
-  if (millis() - last_cmd_time > CMD_TIMEOUT_MS) {
-    // Send stop command to Arduino
-    ARDUINO_SERIAL.print("0.0,0.0\n");
-    last_cmd_time = millis(); // Reset to prevent continuous sending
+  // Safety timeout
+  if (motorsRunning && (millis() - lastCommandTime > TIMEOUT_MS)) {
+    Serial.println("⚠️ Timeout - stopping");
+    sendToArduino(0, 0);
+    motorsRunning = false;
   }
   
-  delay(10);
+  // Periodic telemetry
+  if (millis() - lastTelemetryTime > TELEMETRY_INTERVAL_MS) {
+    sendTelemetry();
+    lastTelemetryTime = millis();
+  }
 }
 
+void connectWiFi() {
+  Serial.printf("Connecting to WiFi '%s'", WIFI_SSID);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.printf("\n✓ WiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
+  } else {
+    Serial.println("\n✗ WiFi failed! Restarting...");
+    ESP.restart();
+  }
+}
+
+void reconnectMqtt() {
+  while (!mqtt.connected()) {
+    Serial.printf("Connecting to MQTT %s:%d...", MQTT_SERVER, MQTT_PORT);
+    
+    String clientId = "esp32_robot_" + String(random(0xffff), HEX);
+    
+    if (mqtt.connect(clientId.c_str())) {
+      Serial.println(" ✓ connected!");
+      mqtt.subscribe(MQTT_TOPIC_CMD);
+      Serial.printf("✓ Subscribed to '%s'\n", MQTT_TOPIC_CMD);
+    } else {
+      Serial.printf(" ✗ failed (rc=%d), retry in 3s...\n", mqtt.state());
+      delay(3000);
+    }
+  }
+}
+
+void onMqttMessage(char* topic, byte* payload, unsigned int length) {
+  // Parse JSON: {"left": X, "right": Y}
+  StaticJsonDocument<128> doc;
+  DeserializationError err = deserializeJson(doc, payload, length);
+  
+  if (err) {
+    Serial.printf("JSON error: %s\n", err.c_str());
+    return;
+  }
+  
+  int left = doc["left"] | 0;
+  int right = doc["right"] | 0;
+  
+  // Clamp values
+  left = constrain(left, -255, 255);
+  right = constrain(right, -255, 255);
+  
+  // Forward to Arduino
+  sendToArduino(left, right);
+  
+  lastLeft = left;
+  lastRight = right;
+  lastCommandTime = millis();
+  motorsRunning = (left != 0 || right != 0);
+  
+  // Debug
+  Serial.printf("L:%4d R:%4d\n", left, right);
+}
+
+void sendToArduino(int left, int right) {
+  // Format: <L:xxx,R:yyy>
+  char buffer[32];
+  snprintf(buffer, sizeof(buffer), "<L:%d,R:%d>", left, right);
+  ARDUINO_SERIAL.print(buffer);
+}
+
+void sendTelemetry() {
+  if (!mqtt.connected()) return;
+  
+  StaticJsonDocument<128> doc;
+  doc["status"] = motorsRunning ? "running" : "idle";
+  doc["left"] = lastLeft;
+  doc["right"] = lastRight;
+  doc["wifi_rssi"] = WiFi.RSSI();
+  doc["uptime_s"] = millis() / 1000;
+  
+  char buffer[128];
+  serializeJson(doc, buffer);
+  mqtt.publish(MQTT_TOPIC_TELEMETRY, buffer);
+}
