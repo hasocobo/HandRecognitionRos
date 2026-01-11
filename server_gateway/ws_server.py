@@ -37,15 +37,20 @@ class ControlMessage:
     angular: float
     enable: bool
     ts_ms: int
+    gripper: Optional[int] = None
     
     @classmethod
     def from_json(cls, data: str) -> 'ControlMessage':
         """Parse from JSON string."""
         d = json.loads(data)
+        gripper = d.get("gripper", None)
+        if gripper is not None:
+            gripper = int(gripper)
         return cls(
             linear=float(d['linear']),
             angular=float(d['angular']),
             enable=bool(d['enable']),
+            gripper=gripper,
             ts_ms=int(d['ts_ms']),
         )
 

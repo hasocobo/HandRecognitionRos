@@ -2,7 +2,7 @@
   Hand Gesture Robot - ARDUINO SLAVE
   
   Receives left/right PWM commands from ESP32 via Serial.
-  Format: <L:xxx,R:yyy>  where xxx/yyy are -255 to 255
+  Format: <L:xxx,R:yyy,G:z>  where xxx/yyy are -255 to 255, z is 0/1
   
   Positive = Forward, Negative = Backward
 */
@@ -14,6 +14,10 @@ const int IN2 = 9;
 // Left Motor
 const int IN3 = 5;
 const int IN4 = 6;
+// Gripper / clipper output (digital on/off)
+const int GRIPPER_PIN = 11;
+const int GRIPPER_OPEN_LEVEL = LOW;
+const int GRIPPER_CLOSED_LEVEL = HIGH;
 
 // --- CONFIGURATION ---
 const unsigned long TIMEOUT_MS = 500;  // Stop if no command for 500ms
@@ -21,6 +25,7 @@ const unsigned long TIMEOUT_MS = 500;  // Stop if no command for 500ms
 // --- STATE ---
 int leftPWM = 0;
 int rightPWM = 0;
+int gripperState = 0;  // 0=open, 1=closed
 unsigned long lastCommandTime = 0;
 
 // Serial Buffer
@@ -33,12 +38,14 @@ void setup() {
   pinMode(IN2, OUTPUT);
   pinMode(IN3, OUTPUT);
   pinMode(IN4, OUTPUT);
+  pinMode(GRIPPER_PIN, OUTPUT);
   
   // Start Serial (match ESP32 baud rate)
   Serial.begin(115200);
   inputString.reserve(64);
   
   stopMotors();
+  setGripper(gripperState);
   Serial.println("Arduino Motor Controller Ready");
 }
 
@@ -85,6 +92,7 @@ void parseCommand(String cmd) {
   int lIdx = cmd.indexOf("L:");
   int rIdx = cmd.indexOf("R:");
   int commaIdx = cmd.indexOf(',');
+  int gIdx = cmd.indexOf("G:");
   
   if (lIdx == -1 || rIdx == -1 || commaIdx == -1) {
     Serial.println("Parse error");
@@ -97,6 +105,19 @@ void parseCommand(String cmd) {
   
   leftPWM = constrain(leftStr.toInt(), -255, 255);
   rightPWM = constrain(rightStr.toInt(), -255, 255);
+
+  if (gIdx != -1) {
+    String gStr = cmd.substring(gIdx + 2);
+    int gCommaIdx = gStr.indexOf(',');
+    if (gCommaIdx != -1) {
+      gStr = gStr.substring(0, gCommaIdx);
+    }
+    int nextState = constrain(gStr.toInt(), 0, 1);
+    if (nextState != gripperState) {
+      gripperState = nextState;
+      setGripper(gripperState);
+    }
+  }
   
   // Debug (comment out for less serial traffic)
   // Serial.print("L:"); Serial.print(leftPWM);
@@ -125,4 +146,12 @@ void stopMotors() {
   digitalWrite(IN2, LOW);
   digitalWrite(IN3, LOW);
   digitalWrite(IN4, LOW);
+}
+
+void setGripper(int state) {
+  if (state != 0) {
+    digitalWrite(GRIPPER_PIN, GRIPPER_CLOSED_LEVEL);
+  } else {
+    digitalWrite(GRIPPER_PIN, GRIPPER_OPEN_LEVEL);
+  }
 }

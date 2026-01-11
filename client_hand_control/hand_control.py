@@ -228,7 +228,7 @@ class DriveState:
 
         # Ranges for bike-like control
         self.depth_range_forward = 0.05  # Push hands toward camera for forward
-        self.depth_range_reverse = 0.03  # Pull hands back for reverse (more sensitive)
+        self.depth_range_reverse = 0.01  # Pull hands back for reverse (more sensitive)
         self.size_range = 0.30           # How much to spread hands for speed boost
         self.turn_depth_range = 0.06     # Steering requires larger hand difference
 

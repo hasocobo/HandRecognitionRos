@@ -172,7 +172,12 @@ class MQTTBridge:
         except Exception as e:
             logger.error(f"Error processing telemetry: {e}")
             
-    def publish_motor_command(self, linear: float, angular: float) -> bool:
+    def publish_motor_command(
+        self,
+        linear: float,
+        angular: float,
+        gripper: Optional[int] = None,
+    ) -> bool:
         """
         Publish motor command as differential drive PWM.
         
@@ -186,6 +191,7 @@ class MQTTBridge:
         Args:
             linear: Linear velocity (m/s), positive = forward
             angular: Angular velocity (rad/s), positive = turn left
+            gripper: Optional gripper command (0=open, 1=closed)
             
         Returns:
             True if published successfully
@@ -220,6 +226,8 @@ class MQTTBridge:
             "right": right_pwm,
             "ts": int(time.time() * 1000),
         }
+        if gripper is not None:
+            payload["gripper"] = 1 if int(gripper) != 0 else 0
         
         try:
             self._client.publish(
@@ -237,7 +245,13 @@ class MQTTBridge:
             logger.error(f"Failed to publish motor command: {e}")
             return False
             
-    def publish_from_twist(self, linear: float, angular: float, enable: bool) -> bool:
+    def publish_from_twist(
+        self,
+        linear: float,
+        angular: float,
+        enable: bool,
+        gripper: Optional[int] = None,
+    ) -> bool:
         """
         Publish motor command from Twist-like values.
         
@@ -245,6 +259,7 @@ class MQTTBridge:
             linear: Linear velocity (m/s)
             angular: Angular velocity (rad/s)
             enable: If False, send zero command
+            gripper: Optional gripper command (0=open, 1=closed)
             
         Returns:
             True if published successfully
@@ -253,7 +268,7 @@ class MQTTBridge:
             linear = 0.0
             angular = 0.0
             
-        return self.publish_motor_command(linear, angular)
+        return self.publish_motor_command(linear, angular, gripper=gripper)
         
     @property
     def connected(self) -> bool:
@@ -291,11 +306,17 @@ class AsyncMQTTBridge:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._bridge.stop)
         
-    async def publish_from_twist(self, linear: float, angular: float, enable: bool) -> bool:
+    async def publish_from_twist(
+        self,
+        linear: float,
+        angular: float,
+        enable: bool,
+        gripper: Optional[int] = None,
+    ) -> bool:
         """Publish motor command from Twist values."""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            None, self._bridge.publish_from_twist, linear, angular, enable
+            None, self._bridge.publish_from_twist, linear, angular, enable, gripper
         )
         
     @property

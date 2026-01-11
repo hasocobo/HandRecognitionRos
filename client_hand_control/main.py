@@ -32,6 +32,7 @@ from .hand_control import (
     compute_handlebar_metrics,
     extract_hands,
     check_both_hands_open,
+    hand_openness_01,
 )
 from .message import ControlMessage, MessageValidator, create_control_message
 from .ws_client import WebSocketClient
@@ -67,9 +68,11 @@ class HandControlClient:
         rtsp_url: Optional[str] = None,
         max_linear: float = 0.22,
         max_angular: float = 2.84,
-        rate: float = 15.0,  # 15 Hz is plenty for robot control
+        rate: float = 25.0,  # 15 Hz is plenty for robot control
         show_preview: bool = False,
         invalid_timeout_ms: int = 300,
+        gripper_open_thresh: float = 0.75,
+        gripper_close_thresh: float = 0.45,
     ):
         """
         Initialize the hand control client.
@@ -84,6 +87,8 @@ class HandControlClient:
             rate: Control loop rate (Hz)
             show_preview: Whether to show OpenCV preview window
             invalid_timeout_ms: Time before force-stop on invalid frames
+            gripper_open_thresh: Right-hand openness threshold to open gripper
+            gripper_close_thresh: Right-hand openness threshold to close gripper
         """
         self.server_url = server_url
         self.token = token
@@ -94,6 +99,15 @@ class HandControlClient:
         self.rate = rate
         self.show_preview = show_preview
         self.invalid_timeout_ms = invalid_timeout_ms
+        self.gripper_open_thresh = max(0.0, min(1.0, gripper_open_thresh))
+        self.gripper_close_thresh = max(0.0, min(1.0, gripper_close_thresh))
+        if self.gripper_close_thresh >= self.gripper_open_thresh:
+            self.gripper_close_thresh = max(0.0, self.gripper_open_thresh - 0.1)
+            logger.warning(
+                "gripper_close_thresh must be lower than gripper_open_thresh; "
+                "adjusted to %.2f",
+                self.gripper_close_thresh,
+            )
         
         # Components
         self.frame_gate = FrameGate(invalid_timeout_ms=invalid_timeout_ms)
@@ -114,6 +128,8 @@ class HandControlClient:
         self._last_send_time = 0.0
         self._send_interval = 1.0 / rate
         self._force_stop_sent = False
+        self._gripper_state: Optional[int] = None
+        self._right_openness: Optional[float] = None
         
         # UI font
         self.font = cv2.FONT_HERSHEY_SIMPLEX
@@ -244,6 +260,15 @@ class HandControlClient:
         left, right = extract_hands(results)
         hands_ok = (left is not None) and (right is not None)
         
+        # ====== RIGHT HAND GRIPPER (open/close) ======
+        self._right_openness = None
+        if right is not None:
+            self._right_openness = hand_openness_01(right[0].landmark)
+            if self._right_openness >= self.gripper_open_thresh:
+                self._gripper_state = 0
+            elif self._right_openness <= self.gripper_close_thresh:
+                self._gripper_state = 1
+        
         # ====== ARMING GESTURE (both hands open) ======
         both_open = check_both_hands_open(left, right)
         arming_progress = self.drive_state.update_arming(both_open)
@@ -330,6 +355,7 @@ class HandControlClient:
             linear=linear,
             angular=angular,
             enable=can_enable,
+            gripper=self._gripper_state,
         )
         
         # Validate message
@@ -437,6 +463,15 @@ class HandControlClient:
         conn_status = "Connected" if (self.ws_client and self.ws_client.connected) else "Disconnected"
         conn_color = (0, 255, 0) if conn_status == "Connected" else (0, 0, 255)
         cv2.putText(frame, f"Server: {conn_status}", (20, 70), self.font, 0.5, conn_color, 1)
+
+        # Gripper status
+        if self._gripper_state is None:
+            gripper_text = "Gripper: --"
+        else:
+            gripper_text = "Gripper: OPEN" if self._gripper_state == 0 else "Gripper: CLOSED"
+        if self._right_openness is not None:
+            gripper_text += f" ({self._right_openness:.2f})"
+        cv2.putText(frame, gripper_text, (20, 100), self.font, 0.5, (200, 200, 200), 1)
         
         # Command display
         linear, angular = self.drive_state.get_velocity_commands(self.max_linear, self.max_angular)
@@ -515,6 +550,8 @@ async def main_async(args: argparse.Namespace) -> None:
         rate=args.rate,
         show_preview=args.preview,
         invalid_timeout_ms=args.invalid_timeout,
+        gripper_open_thresh=args.gripper_open_thresh,
+        gripper_close_thresh=args.gripper_close_thresh,
     )
     
     # Handle shutdown signals (Unix only - Windows uses KeyboardInterrupt)
@@ -600,6 +637,18 @@ def main() -> None:
         type=int,
         default=300,
         help="Timeout (ms) before force-stop on invalid frames",
+    )
+    parser.add_argument(
+        "--gripper-open-thresh",
+        type=float,
+        default=0.75,
+        help="Right-hand openness (0-1) threshold to open gripper",
+    )
+    parser.add_argument(
+        "--gripper-close-thresh",
+        type=float,
+        default=0.45,
+        help="Right-hand openness (0-1) threshold to close gripper",
     )
     parser.add_argument(
         "--debug",

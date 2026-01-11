@@ -140,7 +140,13 @@ class ServerGateway:
         
     async def _on_control_message(self, msg: ControlMessage) -> None:
         """Handle incoming control message from client."""
-        logger.debug(f"Received: linear={msg.linear:.3f}, angular={msg.angular:.3f}, enable={msg.enable}")
+        logger.debug(
+            "Received: linear=%.3f, angular=%.3f, enable=%s, gripper=%s",
+            msg.linear,
+            msg.angular,
+            msg.enable,
+            msg.gripper,
+        )
         
         # Validate bounds
         linear = max(-self.max_linear, min(self.max_linear, msg.linear))
@@ -148,7 +154,12 @@ class ServerGateway:
         
         # Publish to MQTT
         if self.mqtt_bridge and self.mqtt_bridge.connected:
-            await self.mqtt_bridge.publish_from_twist(linear, angular, msg.enable)
+            await self.mqtt_bridge.publish_from_twist(
+                linear,
+                angular,
+                msg.enable,
+                gripper=msg.gripper,
+            )
             
     async def _on_controller_connected(self, client_id: str) -> None:
         """Handle controller connection."""

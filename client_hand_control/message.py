@@ -10,7 +10,7 @@ import time
 import json
 import logging
 from dataclasses import dataclass, asdict
-from typing import Tuple
+from typing import Tuple, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -24,25 +24,34 @@ class ControlMessage:
         linear: Linear velocity in m/s (forward positive)
         angular: Angular velocity in rad/s (counter-clockwise positive)
         enable: Whether drive is enabled
+        gripper: Optional gripper command (0=open, 1=closed)
         ts_ms: Timestamp in milliseconds (monotonic)
     """
     linear: float
     angular: float
     enable: bool
     ts_ms: int
+    gripper: Optional[int] = None
     
     def to_json(self) -> str:
         """Serialize to JSON string."""
-        return json.dumps(asdict(self))
+        payload = asdict(self)
+        if payload.get("gripper") is None:
+            payload.pop("gripper", None)
+        return json.dumps(payload)
     
     @classmethod
     def from_json(cls, data: str) -> 'ControlMessage':
         """Deserialize from JSON string."""
         d = json.loads(data)
+        gripper = d.get("gripper", None)
+        if gripper is not None:
+            gripper = int(gripper)
         return cls(
             linear=float(d['linear']),
             angular=float(d['angular']),
             enable=bool(d['enable']),
+            gripper=gripper,
             ts_ms=int(d['ts_ms']),
         )
     
@@ -53,6 +62,7 @@ class ControlMessage:
             linear=0.0,
             angular=0.0,
             enable=False,
+            gripper=None,
             ts_ms=int(time.monotonic() * 1000),
         )
 
@@ -136,6 +146,12 @@ class MessageValidator:
             self._dropped_count += 1
             logger.warning(f"Invalid message: enable={msg.enable} is not boolean")
             return False, "enable_not_boolean"
+
+        # Check 7: gripper command (if provided) is 0 or 1
+        if msg.gripper is not None and msg.gripper not in (0, 1):
+            self._dropped_count += 1
+            logger.warning(f"Invalid message: gripper={msg.gripper} is not 0/1")
+            return False, "gripper_not_valid"
         
         # All checks passed
         self._last_ts = msg.ts_ms
@@ -156,10 +172,15 @@ class MessageValidator:
             Tuple of (clamped_message, is_valid, reason)
         """
         # Clamp values
+        gripper = msg.gripper
+        if gripper is not None:
+            gripper = 1 if int(gripper) != 0 else 0
+
         clamped = ControlMessage(
             linear=max(-self.max_linear, min(self.max_linear, msg.linear)),
             angular=max(-self.max_angular, min(self.max_angular, msg.angular)),
             enable=msg.enable,
+            gripper=gripper,
             ts_ms=msg.ts_ms,
         )
         
@@ -192,6 +213,7 @@ def create_control_message(
     linear: float,
     angular: float,
     enable: bool,
+    gripper: Optional[int] = None,
 ) -> ControlMessage:
     """
     Create a control message with current timestamp.
@@ -200,6 +222,7 @@ def create_control_message(
         linear: Linear velocity in m/s
         angular: Angular velocity in rad/s
         enable: Whether drive is enabled
+        gripper: Optional gripper command (0=open, 1=closed)
         
     Returns:
         ControlMessage instance
@@ -208,6 +231,7 @@ def create_control_message(
         linear=linear,
         angular=angular,
         enable=enable,
+        gripper=gripper,
         ts_ms=int(time.monotonic() * 1000),
     )
 
