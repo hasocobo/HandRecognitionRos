@@ -1,5 +1,5 @@
 """
-Hand Control Logic - Ported from hand_drive_node.py without ROS2 dependencies.
+Hand Control Logic - Ported from legacy ROS2 logic without ROS2 dependencies.
 
 This module contains the handlebar-style control logic for computing
 robot velocity commands from MediaPipe hand landmarks.
@@ -69,14 +69,6 @@ def _norm(v: np.ndarray) -> np.ndarray:
     """Normalize vector."""
     n = np.linalg.norm(v)
     return v / (n + 1e-8)
-
-
-def _angle_deg(u: np.ndarray, v: np.ndarray) -> float:
-    """Calculate angle in degrees between two vectors."""
-    u = _norm(u)
-    v = _norm(v)
-    d = float(np.clip(np.dot(u, v), -1.0, 1.0))
-    return math.degrees(math.acos(d))
 
 
 def _angle_diff_deg(a: float, b: float) -> float:
@@ -150,21 +142,6 @@ def hand_openness_01(lm) -> float:
     feats = _all_finger_feats(lm)
     vals = [finger_openness_01(f) for f in feats.values()]
     return float(np.mean(vals)) if vals else 0.0
-
-
-def palm_facing_sign(lm) -> Tuple[int, float]:
-    """Determine if palm is facing camera (+1) or away (-1)."""
-    tips = [INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP]
-    mcps = [INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP]
-    tip_z = float(np.mean([lm[i].z for i in tips]))
-    mcp_z = float(np.mean([lm[i].z for i in mcps]))
-    dz = mcp_z - tip_z  # >0: tips closer than knuckles -> palm to camera
-    THR = 0.015
-    if dz > THR:
-        return +1, dz
-    if dz < -THR:
-        return -1, dz
-    return 0, dz
 
 
 # ============================================================================

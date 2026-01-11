@@ -18,8 +18,6 @@ import websockets
 from websockets.client import WebSocketClientProtocol
 from websockets.exceptions import (
     ConnectionClosed,
-    ConnectionClosedError,
-    ConnectionClosedOK,
     InvalidStatusCode,
     WebSocketException,
 )

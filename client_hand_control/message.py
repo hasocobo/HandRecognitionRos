@@ -10,7 +10,7 @@ import time
 import json
 import logging
 from dataclasses import dataclass, asdict
-from typing import Optional, Tuple
+from typing import Tuple
 
 logger = logging.getLogger(__name__)
 

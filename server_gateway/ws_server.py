@@ -5,18 +5,17 @@ Handles:
 - FastAPI WebSocket endpoint at /control
 - Bearer token authentication
 - Single-controller lock (first client to send enable=true owns control)
-- Message parsing and forwarding to ROS bridge
+- Message parsing and forwarding to the gateway callback
 """
 
 import asyncio
 import json
 import logging
-import os
 import time
-from typing import Optional, Callable, Awaitable, Dict, Any
+from typing import Optional, Callable, Awaitable, Dict
 from dataclasses import dataclass
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, status
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger(__name__)

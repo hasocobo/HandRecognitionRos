@@ -32,8 +32,6 @@ from .hand_control import (
     compute_handlebar_metrics,
     extract_hands,
     check_both_hands_open,
-    hand_openness_01,
-    clamp,
 )
 from .message import ControlMessage, MessageValidator, create_control_message
 from .ws_client import WebSocketClient

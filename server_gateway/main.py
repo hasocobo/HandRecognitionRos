@@ -3,7 +3,6 @@
 Server Gateway - Main Entry Point
 
 This server receives control messages from hand gesture clients and:
-- Publishes to ROS2 topics (/cmd_vel, /drive_enabled)
 - Bridges to MQTT for ESP32 motor control
 - Implements deadman safety timer
 - Enforces single-controller lock
@@ -26,21 +25,12 @@ import logging
 import os
 import signal
 import sys
-from typing import Optional, TYPE_CHECKING
+from typing import Optional
 
 import uvicorn
 
 from .ws_server import WebSocketServer, ControlMessage
 from .mqtt_bridge import AsyncMQTTBridge
-
-# Conditionally import ROS bridge
-ROS_AVAILABLE = False
-ROSBridgeManager = None
-try:
-    from .ros_bridge import ROSBridgeManager
-    ROS_AVAILABLE = True
-except ImportError:
-    pass  # ROS2 not installed
 
 # Configure logging
 logging.basicConfig(
@@ -52,11 +42,10 @@ logger = logging.getLogger(__name__)
 
 class ServerGateway:
     """
-    Main server gateway integrating WebSocket, ROS, and MQTT.
+    Main server gateway integrating WebSocket and MQTT.
     
     Architecture:
-        Client -> WebSocket -> ServerGateway -> ROS2 (/cmd_vel)
-                                             -> MQTT (robot/cmd)
+        Client -> WebSocket -> ServerGateway -> MQTT (robot/cmd)
     """
     
     def __init__(
@@ -69,7 +58,6 @@ class ServerGateway:
         max_angular: float = 2.84,
         mqtt_host: str = "localhost",
         mqtt_port: int = 1883,
-        enable_ros: bool = True,
         enable_mqtt: bool = True,
     ):
         """
@@ -84,7 +72,6 @@ class ServerGateway:
             max_angular: Maximum angular velocity for validation
             mqtt_host: MQTT broker host
             mqtt_port: MQTT broker port
-            enable_ros: Whether to enable ROS2 bridge
             enable_mqtt: Whether to enable MQTT bridge
         """
         self.token = token
@@ -95,12 +82,10 @@ class ServerGateway:
         self.max_angular = max_angular
         self.mqtt_host = mqtt_host
         self.mqtt_port = mqtt_port
-        self.enable_ros = enable_ros
         self.enable_mqtt = enable_mqtt
         
         # Components
         self.ws_server: Optional[WebSocketServer] = None
-        self.ros_bridge: Optional[ROSBridgeManager] = None
         self.mqtt_bridge: Optional[AsyncMQTTBridge] = None
         
         # State
@@ -109,19 +94,6 @@ class ServerGateway:
     async def start(self) -> None:
         """Start all server components."""
         logger.info("Starting Server Gateway...")
-        
-        # Start ROS bridge
-        if self.enable_ros and ROSBridgeManager is not None:
-            try:
-                self.ros_bridge = ROSBridgeManager(deadman_ms=self.deadman_ms)
-                self.ros_bridge.start()
-                logger.info("ROS bridge started")
-            except Exception as e:
-                logger.error(f"Failed to start ROS bridge: {e}")
-                logger.warning("Continuing without ROS bridge")
-                self.ros_bridge = None
-        else:
-            logger.info("Running in MQTT-only mode (no ROS2)")
         
         # Start MQTT bridge
         if self.enable_mqtt:
@@ -164,11 +136,6 @@ class ServerGateway:
             await self.mqtt_bridge.stop()
             logger.info("MQTT bridge stopped")
             
-        # Stop ROS bridge
-        if self.ros_bridge:
-            self.ros_bridge.stop()
-            logger.info("ROS bridge stopped")
-            
         logger.info("Server Gateway stopped")
         
     async def _on_control_message(self, msg: ControlMessage) -> None:
@@ -179,10 +146,6 @@ class ServerGateway:
         linear = max(-self.max_linear, min(self.max_linear, msg.linear))
         angular = max(-self.max_angular, min(self.max_angular, msg.angular))
         
-        # Publish to ROS
-        if self.ros_bridge:
-            self.ros_bridge.publish_command(linear, angular, msg.enable)
-            
         # Publish to MQTT
         if self.mqtt_bridge and self.mqtt_bridge.connected:
             await self.mqtt_bridge.publish_from_twist(linear, angular, msg.enable)
@@ -195,17 +158,14 @@ class ServerGateway:
         """Handle controller disconnection - force stop."""
         logger.info(f"Controller disconnected: {client_id}")
         
-        # Force stop on all bridges
-        if self.ros_bridge:
-            self.ros_bridge.force_stop()
-            
+        # Force stop on MQTT bridge
         if self.mqtt_bridge and self.mqtt_bridge.connected:
             await self.mqtt_bridge.publish_from_twist(0.0, 0.0, False)
             
     def _on_telemetry(self, data: dict) -> None:
         """Handle telemetry from ESP32."""
         logger.debug(f"Telemetry: {data}")
-        # Could republish to ROS topic here if needed
+        # Hook for optional telemetry handling
         
     def get_app(self):
         """Get the FastAPI application for uvicorn."""
@@ -215,7 +175,6 @@ class ServerGateway:
         """Get server statistics."""
         stats = {
             "ws_server": self.ws_server.get_stats() if self.ws_server else {},
-            "ros_bridge": self.ros_bridge.get_stats() if self.ros_bridge else {},
             "mqtt_bridge": self.mqtt_bridge.get_stats() if self.mqtt_bridge else {},
         }
         return stats
@@ -248,11 +207,6 @@ async def main_async() -> None:
     mqtt_host = os.environ.get("MQTT_HOST", "localhost")
     mqtt_port = int(os.environ.get("MQTT_PORT", "1883"))
     
-    # Check if ROS is available
-    enable_ros = ROS_AVAILABLE
-    if not enable_ros:
-        logger.warning("ROS2 (rclpy) not available, running without ROS bridge")
-        
     # Check if MQTT is available
     enable_mqtt = True
     try:
@@ -269,7 +223,6 @@ async def main_async() -> None:
         max_angular=max_angular,
         mqtt_host=mqtt_host,
         mqtt_port=mqtt_port,
-        enable_ros=enable_ros,
         enable_mqtt=enable_mqtt,
     )
     

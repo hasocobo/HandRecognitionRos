@@ -12,7 +12,6 @@ import json
 import logging
 import time
 from typing import Optional, Callable
-import threading
 
 import paho.mqtt.client as mqtt
 
@@ -72,9 +71,6 @@ class MQTTBridge:
         self._messages_sent = 0
         self._messages_received = 0
         self._last_send_time: Optional[float] = None
-        
-        # Thread for MQTT loop
-        self._loop_thread: Optional[threading.Thread] = None
         
     def start(self) -> bool:
         """

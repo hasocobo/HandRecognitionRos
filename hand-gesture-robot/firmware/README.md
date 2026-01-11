@@ -1,100 +1,59 @@
-# Firmware for ESP32 + Arduino Master-Slave Configuration
+# ESP32 + Arduino Firmware (MQTT)
 
-This directory contains firmware code for connecting your hand gesture control system to a TurtleBot.
+This firmware bridges MQTT motor commands to an Arduino motor controller.
 
 ## Directory Structure
 
 ```
 firmware/
-├── README.md                    # This file
 ├── esp32_master/
-│   ├── esp32_master.ino         # ESP32 master code (micro-ROS subscriber)
-│   └── platformio.ini           # PlatformIO configuration (optional)
+│   └── esp32_master.ino
 └── arduino_slave/
-    └── arduino_slave.ino        # Arduino slave code (motor control)
+    └── arduino_slave.ino
 ```
 
 ## Quick Start
 
-1. **ESP32 (Master)**:
-   - Open `esp32_master/esp32_master.ino` in Arduino IDE or PlatformIO
-   - Configure WiFi credentials (if using WiFi)
-   - Upload to ESP32
+1. Flash `esp32_master/esp32_master.ino` to the ESP32.
+2. Flash `arduino_slave/arduino_slave.ino` to the Arduino.
+3. Wire the boards and motors (see below).
+4. Configure WiFi and MQTT settings in `esp32_master.ino`.
 
-2. **Arduino (Slave)**:
-   - Open `arduino_slave/arduino_slave.ino` in Arduino IDE
-   - Adjust pin numbers to match your wiring
-   - Upload to Arduino
+## Wiring
 
-3. **Connect Hardware**:
-   - Connect ESP32 TX → Arduino RX
-   - Connect ESP32 RX → Arduino TX
-   - Connect GND → GND
+- ESP32 TX2 (GPIO17) -> Arduino RX
+- ESP32 RX2 (GPIO16) -> Arduino TX
+- ESP32 GND -> Arduino GND
 
-4. **Start micro-ROS Agent**:
-   ```bash
-   ros2 run micro_ros_agent micro_ros_agent serial --dev /dev/ttyUSB0
-   ```
+## MQTT Contract
 
-5. **Test**:
-   ```bash
-   ros2 topic echo /cmd_vel
-   ```
+- Command topic: `robot/cmd`
+- Telemetry topic: `robot/telemetry` (optional)
+- Payload:
 
-## Configuration
+```json
+{"left": -255, "right": 255, "ts": 1700000000000}
+```
 
-### ESP32 Configuration
+## ESP32 Configuration
 
 Edit these constants in `esp32_master.ino`:
-- `WIFI_SSID`: Your WiFi network name
-- `WIFI_PASSWORD`: Your WiFi password
-- `SERIAL_BAUD`: Serial communication speed (default: 115200)
+- `WIFI_SSID`
+- `WIFI_PASS`
+- `MQTT_SERVER`
+- `MQTT_PORT`
 
-### Arduino Configuration
+## Arduino Serial Protocol
 
-Edit these constants in `arduino_slave.ino`:
-- `LEFT_MOTOR_PWM`: PWM pin for left motor speed
-- `LEFT_MOTOR_IN1`: Left motor forward pin
-- `LEFT_MOTOR_IN2`: Left motor backward pin
-- `RIGHT_MOTOR_PWM`: PWM pin for right motor speed
-- `RIGHT_MOTOR_IN1`: Right motor forward pin
-- `RIGHT_MOTOR_IN2`: Right motor backward pin
-- `SERIAL_BAUD`: Must match ESP32 (default: 115200)
-- `WHEEL_RADIUS`: Wheel radius in meters
-- `WHEEL_BASE`: Distance between wheels in meters
-
-## Communication Protocol
-
-### ESP32 → Arduino
-
-Serial communication at 115200 baud, format:
-```
-<linear_velocity>,<angular_velocity>\n
-```
-
-Example:
-```
-0.15,-0.5\n
-```
-
-Where:
-- `linear_velocity`: Forward/backward speed in m/s (-0.22 to +0.22)
-- `angular_velocity`: Rotational speed in rad/s (-2.84 to +2.84)
-
-### Error Handling
-
-- If no message received for 1 second, motors stop (safety feature)
-- Invalid messages are ignored
-- Checksum can be added for reliability
-
-## Motor Control
-
-The Arduino implements differential drive kinematics:
+The ESP32 sends commands to the Arduino over Serial2:
 
 ```
-v_left = linear_vel - (angular_vel * wheel_base / 2)
-v_right = linear_vel + (angular_vel * wheel_base / 2)
+<L:xxx,R:yyy>
 ```
 
-Motor speeds are converted to PWM values (0-255) and sent to motor driver.
+Where `xxx` and `yyy` are PWM values in `-255..255`.
 
+## Safety
+
+- ESP32 stops motors if no MQTT command arrives for `TIMEOUT_MS`.
+- Arduino stops motors if no serial command arrives for `TIMEOUT_MS`.
