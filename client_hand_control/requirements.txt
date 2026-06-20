@@ -8,6 +8,12 @@ opencv-python>=4.8.0
 # Hand detection
 mediapipe==0.10.21
 
-# WebSocket client
+# MQTT publisher (active transport)
+paho-mqtt>=1.6.1
+
+# Keyboard control (WASD driving). macOS needs Accessibility permission.
+pynput>=1.7.6
+
+# WebSocket client (legacy path, kept but unused)
 websockets>=12.0
 

@@ -34,8 +34,10 @@ from .hand_control import (
     check_both_hands_open,
 )
 from .gestures import GestureState
+from .keyboard_control import KeyboardController
 from .message import ControlMessage, MessageValidator, create_control_message
-from .ws_client import WebSocketClient
+from .mqtt_publisher import AsyncMQTTPublisher
+from .ws_client import WebSocketClient  # kept for reference; no longer on the active path
 
 # Configure logging
 logging.basicConfig(
@@ -62,8 +64,9 @@ class HandControlClient:
     
     def __init__(
         self,
-        server_url: str,
-        token: str,
+        broker: str = "localhost",
+        port: int = 1883,
+        topic: str = "robot/cmd",
         camera_index: int = 0,
         rtsp_url: Optional[str] = None,
         max_linear: float = 0.22,
@@ -76,8 +79,9 @@ class HandControlClient:
         Initialize the hand control client.
 
         Args:
-            server_url: WebSocket server URL
-            token: Authentication token
+            broker: MQTT broker host
+            port: MQTT broker port
+            topic: MQTT topic to publish control messages to
             camera_index: Camera device index (used if rtsp_url is None)
             rtsp_url: RTSP stream URL (overrides camera_index if set)
             max_linear: Maximum linear velocity (m/s)
@@ -86,8 +90,9 @@ class HandControlClient:
             show_preview: Whether to show OpenCV preview window
             invalid_timeout_ms: Time before force-stop on invalid frames
         """
-        self.server_url = server_url
-        self.token = token
+        self.broker = broker
+        self.port = port
+        self.topic = topic
         self.camera_index = camera_index
         self.rtsp_url = rtsp_url
         self.max_linear = max_linear
@@ -102,7 +107,12 @@ class HandControlClient:
         self.drive_state = DriveState()
         self.gesture_state = GestureState()
         self.validator = MessageValidator(max_linear=max_linear, max_angular=max_angular)
-        self.ws_client: Optional[WebSocketClient] = None
+        self.transport: Optional[AsyncMQTTPublisher] = None
+        self.keyboard: Optional[KeyboardController] = None
+
+        # Keyboard driving speed scaling (fraction of max). Nitro (Shift) = 1.0.
+        self.kb_normal_speed = 0.6   # ~155 PWM after the rover's mixing
+        self.kb_turn_frac = 0.6      # steering rate is not nitro-boosted
         
         # Camera
         self.cap: Optional[cv2.VideoCapture] = None
@@ -137,26 +147,44 @@ class HandControlClient:
             min_tracking_confidence=0.5,
         )
         
-        # Initialize WebSocket client
-        self.ws_client = WebSocketClient(
-            server_url=self.server_url,
-            token=self.token,
+        # Initialize MQTT publisher (publishes straight to the broker)
+        self.transport = AsyncMQTTPublisher(
+            broker=self.broker,
+            port=self.port,
+            topic=self.topic,
             on_connected=self._on_connected,
             on_disconnected=self._on_disconnected,
         )
-        await self.ws_client.start()
-        
+        await self.transport.start()
+
+        # Keyboard control (second input source). Discrete keys drive the same
+        # GestureState the hand poses do.
+        self.keyboard = KeyboardController(
+            on_mode_toggle=self.gesture_state.toggle_mode,
+            on_lane=self.gesture_state.emit_lane,
+            on_auto_toggle=self.gesture_state.toggle_auto,
+        )
+        self.keyboard.start()
+
         self._running = True
         logger.info("Hand Control Client started")
-        
+
     async def stop(self) -> None:
         """Stop the client and clean up resources."""
         logger.info("Stopping Hand Control Client...")
         self._running = False
-        
-        # Send final STOP
-        if self.ws_client:
-            await self.ws_client.stop()
+
+        # Stop keyboard listener
+        if self.keyboard:
+            self.keyboard.stop()
+
+        # Send a final STOP, then disconnect.
+        if self.transport:
+            try:
+                await self.transport.send_async(ControlMessage.stop_message())
+            except Exception:
+                pass
+            await self.transport.stop()
             
         # Clean up camera
         if self.cap:
@@ -318,58 +346,73 @@ class HandControlClient:
             cv2.imshow("Hand Control Client", frame)
             
     async def _send_control_message(self, hands_ok: bool, lost_active: bool) -> None:
-        """Create, validate, and send a control message."""
-        # Determine if we should send enable=true
-        # Drive only enabled when: user toggled enable AND frame valid AND hands ok
-        can_enable = (
-            self.drive_state.enabled and
-            hands_ok and
-            not self.drive_state.calibrating and
-            self.drive_state.baseline is not None
-        )
-        
-        # If hands lost for too long, force disable
-        if lost_active:
-            can_enable = False
-            
-        # Get velocity commands
-        linear, angular = self.drive_state.get_velocity_commands(
-            self.max_linear, self.max_angular
-        )
-        
-        # If not enabled, zero the commands
-        if not can_enable:
+        """Create, validate, and send a control message.
+
+        The 'enable' flag and motion fields depend on mode:
+        - offroad (manual): handlebar drives linear/angular; enable = arming.
+        - onroad (autonomous): the robot steers itself, so linear/angular are 0
+          and enable = the both-fists auto-run toggle.
+        """
+        gs = self.gesture_state
+        mode = gs.mode
+
+        if mode == "onroad":
+            # Robot drives itself; we only say run/stop.
+            can_enable = gs.auto_running
             linear = 0.0
             angular = 0.0
+        elif self.keyboard and self.keyboard.driving():
+            # Keyboard override (offroad): WASD takes the wheel while held.
+            lin_dir, ang_dir, nitro = self.keyboard.drive_axes()
+            speed = 1.0 if nitro else self.kb_normal_speed
+            linear = lin_dir * speed * self.max_linear
+            angular = ang_dir * self.kb_turn_frac * self.max_angular
+            can_enable = True
+        else:
+            # Manual handlebar drive.
+            can_enable = (
+                self.drive_state.enabled and
+                hands_ok and
+                not self.drive_state.calibrating and
+                self.drive_state.baseline is not None
+            )
+            if lost_active:
+                can_enable = False
+            linear, angular = self.drive_state.get_velocity_commands(
+                self.max_linear, self.max_angular
+            )
+            if not can_enable:
+                linear = 0.0
+                angular = 0.0
 
         # E-stop override: while latched, force motion to zero and disable, on top
-        # of publishing the flag. Client-side effect — the raspi must honor estop
+        # of publishing the flag. Client-side effect — the robot must honor estop
         # too, but we don't wait for it to act.
-        if self.gesture_state.estop:
+        if gs.estop:
             linear = 0.0
             angular = 0.0
             can_enable = False
 
-        # Create message
         msg = create_control_message(
             linear=linear,
             angular=angular,
             enable=can_enable,
-            mode=self.gesture_state.mode,
-            lane=self.gesture_state.lane,
-            estop=self.gesture_state.estop,
+            mode=mode,
+            estop=gs.estop,
+            lane_seq=gs.lane_seq,
+            lane_dir=gs.lane_dir,
         )
-        
+
         # Validate message
         clamped_msg, valid, reason = self.validator.clamp_and_validate(msg)
-        
+
         if not valid:
             logger.warning(f"Message validation failed: {reason}")
             return
-            
+
         # Send message
-        if self.ws_client and self.ws_client.connected:
-            success = await self.ws_client.send_async(clamped_msg)
+        if self.transport and self.transport.connected:
+            success = await self.transport.send_async(clamped_msg)
             if success:
                 self._force_stop_sent = False
                 
@@ -383,12 +426,13 @@ class HandControlClient:
         # Force drive state to stop
         self.drive_state.force_stop()
         self.drive_state.enabled = False
-        
+        self.gesture_state.auto_running = False  # also halt onroad autonomy
+
         # Create and send stop message
         msg = ControlMessage.stop_message()
-        
-        if self.ws_client and self.ws_client.connected:
-            success = await self.ws_client.send_async(msg)
+
+        if self.transport and self.transport.connected:
+            success = await self.transport.send_async(msg)
             if success:
                 self._force_stop_sent = True
                 logger.info("Force stop message sent")
@@ -462,20 +506,34 @@ class HandControlClient:
         cv2.putText(frame, status, (20, 40), self.font, 0.9, color, 2)
         
         # Connection status
-        conn_status = "Connected" if (self.ws_client and self.ws_client.connected) else "Disconnected"
+        conn_status = "Connected" if (self.transport and self.transport.connected) else "Disconnected"
         conn_color = (0, 255, 0) if conn_status == "Connected" else (0, 0, 255)
-        cv2.putText(frame, f"Server: {conn_status}", (20, 70), self.font, 0.5, conn_color, 1)
+        cv2.putText(frame, f"Broker: {conn_status}", (20, 70), self.font, 0.5, conn_color, 1)
 
-        # Discrete-gesture state: mode / lane / e-stop
+        # Active input source: keyboard takes over while WASD is held.
+        kb_driving = bool(self.keyboard and self.keyboard.driving())
+        if kb_driving:
+            _, _, nitro = self.keyboard.drive_axes()
+            src_txt = "INPUT: KEYBOARD" + ("  NITRO" if nitro else "")
+            cv2.putText(frame, src_txt, (w - 260, 70), self.font, 0.5,
+                        (0, 0, 255) if nitro else (0, 255, 0), 2)
+
+        # Discrete-gesture state: mode / run-state / e-stop
         gs = self.gesture_state
         mode_color = (0, 200, 255) if gs.mode == "onroad" else (180, 180, 180)
         cv2.putText(frame, f"Mode: {gs.mode.upper()}", (20, 100), self.font, 0.5, mode_color, 1)
-        cv2.putText(frame, f"Lane: {gs.lane.upper()}", (20, 125), self.font, 0.5, mode_color, 1)
+        if gs.mode == "onroad":
+            run_txt = "AUTO: RUNNING" if gs.auto_running else "AUTO: IDLE (both fists to start)"
+            run_color = (0, 255, 0) if gs.auto_running else (0, 165, 255)
+            cv2.putText(frame, run_txt, (20, 125), self.font, 0.5, run_color, 1)
+        if gs.lane_dir and gs.lane_dir != "keep":
+            cv2.putText(frame, f"Lane cmd: {gs.lane_dir.upper()} (#{gs.lane_seq})",
+                        (20, 148), self.font, 0.5, (0, 255, 255), 2)
         if gs.estop:
             # Loud, centered banner — this is the one you must not miss.
             cv2.putText(frame, "*** E-STOP ***", (w // 2 - 120, 50), self.font, 1.0, (0, 0, 255), 3)
         if gs.last_event:
-            cv2.putText(frame, gs.last_event, (20, 150), self.font, 0.5, (0, 255, 0), 1)
+            cv2.putText(frame, gs.last_event, (20, 172), self.font, 0.5, (0, 255, 0), 1)
         
         # Command display
         linear, angular = self.drive_state.get_velocity_commands(self.max_linear, self.max_angular)
@@ -545,8 +603,9 @@ class HandControlClient:
 async def main_async(args: argparse.Namespace) -> None:
     """Async main entry point."""
     client = HandControlClient(
-        server_url=args.server,
-        token=args.token,
+        broker=args.broker,
+        port=args.port,
+        topic=args.topic,
         camera_index=args.camera,
         rtsp_url=args.rtsp,
         max_linear=args.max_linear,
@@ -588,16 +647,22 @@ def main() -> None:
     )
     
     parser.add_argument(
-        "--server",
+        "--broker",
         type=str,
-        default="ws://127.0.0.1:8080/control",
-        help="WebSocket server URL",
+        default="localhost",
+        help="MQTT broker host (the robot, or wherever mosquitto runs)",
     )
     parser.add_argument(
-        "--token",
+        "--port",
+        type=int,
+        default=1883,
+        help="MQTT broker port",
+    )
+    parser.add_argument(
+        "--topic",
         type=str,
-        required=True,
-        help="Authentication token",
+        default="robot/cmd",
+        help="MQTT topic to publish control messages to",
     )
     parser.add_argument(
         "--camera",

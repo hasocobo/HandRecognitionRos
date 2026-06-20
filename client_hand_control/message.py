@@ -23,10 +23,11 @@ class ControlMessage:
     Attributes:
         linear: Linear velocity in m/s (forward positive)
         angular: Angular velocity in rad/s (counter-clockwise positive)
-        enable: Whether drive is enabled
+        enable: Whether drive is enabled (armed/running for the current mode)
         mode: Optional drive mode ("onroad"=ADAS / "offroad"=manual)
-        lane: Optional target lane ("left" / "center" / "right")
         estop: Optional emergency-stop flag (latched until re-arm)
+        lane_seq: Optional lane-change counter (increments per change event)
+        lane_dir: Optional last lane-change direction ("left" / "right")
         ts_ms: Timestamp in milliseconds (monotonic)
     """
     linear: float
@@ -34,19 +35,20 @@ class ControlMessage:
     enable: bool
     ts_ms: int
     mode: Optional[str] = None
-    lane: Optional[str] = None
     estop: Optional[bool] = None
+    lane_seq: Optional[int] = None
+    lane_dir: Optional[str] = None
 
     def to_json(self) -> str:
         """Serialize to JSON string."""
         payload = asdict(self)
         # Drop optional keys that aren't set, so the wire payload stays lean and
         # consumers that don't know a field simply never see it.
-        for key in ("mode", "lane", "estop"):
+        for key in ("mode", "estop", "lane_seq", "lane_dir"):
             if payload.get(key) is None:
                 payload.pop(key, None)
         return json.dumps(payload)
-    
+
     @classmethod
     def from_json(cls, data: str) -> 'ControlMessage':
         """Deserialize from JSON string."""
@@ -54,13 +56,17 @@ class ControlMessage:
         estop = d.get("estop", None)
         if estop is not None:
             estop = bool(estop)
+        lane_seq = d.get("lane_seq", None)
+        if lane_seq is not None:
+            lane_seq = int(lane_seq)
         return cls(
             linear=float(d['linear']),
             angular=float(d['angular']),
             enable=bool(d['enable']),
             mode=d.get("mode", None),
-            lane=d.get("lane", None),
             estop=estop,
+            lane_seq=lane_seq,
+            lane_dir=d.get("lane_dir", None),
             ts_ms=int(d['ts_ms']),
         )
     
@@ -163,15 +169,20 @@ class MessageValidator:
             logger.warning(f"Invalid message: mode={msg.mode} is not onroad/offroad")
             return False, "mode_not_valid"
 
-        if msg.lane is not None and msg.lane not in ("left", "center", "right"):
-            self._dropped_count += 1
-            logger.warning(f"Invalid message: lane={msg.lane} is not left/center/right")
-            return False, "lane_not_valid"
-
         if msg.estop is not None and not isinstance(msg.estop, bool):
             self._dropped_count += 1
             logger.warning(f"Invalid message: estop={msg.estop} is not boolean")
             return False, "estop_not_boolean"
+
+        if msg.lane_dir is not None and msg.lane_dir not in ("keep", "left", "right"):
+            self._dropped_count += 1
+            logger.warning(f"Invalid message: lane_dir={msg.lane_dir} is not keep/left/right")
+            return False, "lane_dir_not_valid"
+
+        if msg.lane_seq is not None and (not isinstance(msg.lane_seq, int) or msg.lane_seq < 0):
+            self._dropped_count += 1
+            logger.warning(f"Invalid message: lane_seq={msg.lane_seq} is not a non-negative int")
+            return False, "lane_seq_not_valid"
 
         # All checks passed
         self._last_ts = msg.ts_ms
@@ -197,8 +208,9 @@ class MessageValidator:
             angular=max(-self.max_angular, min(self.max_angular, msg.angular)),
             enable=msg.enable,
             mode=msg.mode,
-            lane=msg.lane,
             estop=msg.estop,
+            lane_seq=msg.lane_seq,
+            lane_dir=msg.lane_dir,
             ts_ms=msg.ts_ms,
         )
         
@@ -232,8 +244,9 @@ def create_control_message(
     angular: float,
     enable: bool,
     mode: Optional[str] = None,
-    lane: Optional[str] = None,
     estop: Optional[bool] = None,
+    lane_seq: Optional[int] = None,
+    lane_dir: Optional[str] = None,
 ) -> ControlMessage:
     """
     Create a control message with current timestamp.
@@ -243,8 +256,9 @@ def create_control_message(
         angular: Angular velocity in rad/s
         enable: Whether drive is enabled
         mode: Optional drive mode ("onroad"/"offroad")
-        lane: Optional target lane ("left"/"center"/"right")
         estop: Optional emergency-stop flag
+        lane_seq: Optional lane-change counter
+        lane_dir: Optional last lane-change direction ("left"/"right")
 
     Returns:
         ControlMessage instance
@@ -254,8 +268,9 @@ def create_control_message(
         angular=angular,
         enable=enable,
         mode=mode,
-        lane=lane,
         estop=estop,
+        lane_seq=lane_seq,
+        lane_dir=lane_dir,
         ts_ms=int(time.monotonic() * 1000),
     )
 
