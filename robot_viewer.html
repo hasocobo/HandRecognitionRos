@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Robot Control Viewer</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: #1a1a2e;
+            color: white;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        h1 {
+            text-align: center;
+            color: #00d4ff;
+        }
+        .container {
+            display: flex;
+            gap: 20px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+        .panel {
+            background: #16213e;
+            border-radius: 12px;
+            padding: 15px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        }
+        .panel h2 {
+            margin: 0 0 10px 0;
+            color: #e94560;
+        }
+        #stream {
+            border-radius: 8px;
+            max-width: 100%;
+        }
+        .status {
+            padding: 10px;
+            background: #0f3460;
+            border-radius: 8px;
+            margin-top: 10px;
+        }
+        .controls {
+            display: grid;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+        input[type="text"] {
+            padding: 10px;
+            border-radius: 6px;
+            border: none;
+            background: #0f3460;
+            color: white;
+            font-size: 14px;
+        }
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 6px;
+            background: #e94560;
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+        }
+        button:hover {
+            background: #ff6b6b;
+        }
+        .info {
+            background: #0f3460;
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 20px;
+        }
+        code {
+            background: #1a1a2e;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🤖 Robot Control Viewer</h1>
+    
+    <div class="container">
+        <div class="panel">
+            <h2>📹 ESP32-CAM Stream</h2>
+            <div class="controls">
+                <input type="text" id="esp-ip" placeholder="ESP32-CAM IP (e.g., 192.168.1.50)" value="">
+                <button onclick="connectStream()">Connect Stream</button>
+            </div>
+            <img id="stream" src="" alt="Click 'Connect Stream' to start" 
+                 style="width: 640px; height: 480px; background: #000;">
+            <div class="status" id="status">Status: Not connected</div>
+        </div>
+    </div>
+    
+    <div class="info">
+        <h3>📋 Quick Start</h3>
+        <ol>
+            <li>Enter your ESP32-CAM IP address (check Serial Monitor)</li>
+            <li>Click "Connect Stream"</li>
+            <li>Run the hand control client in a separate terminal</li>
+            <li>Control the robot with your hands while watching the stream!</li>
+        </ol>
+        <p><strong>Hand Control Command:</strong></p>
+        <code>python -m client_hand_control.main --server ws://YOUR_SERVER:8080/control --token test123 --camera 0 --preview</code>
+    </div>
+
+    <script>
+        // Try to load saved IP
+        const savedIp = localStorage.getItem('esp32_ip');
+        if (savedIp) {
+            document.getElementById('esp-ip').value = savedIp;
+        }
+
+        function connectStream() {
+            const ip = document.getElementById('esp-ip').value.trim();
+            if (!ip) {
+                alert('Please enter the ESP32-CAM IP address');
+                return;
+            }
+            
+            // Save IP for next time
+            localStorage.setItem('esp32_ip', ip);
+            
+            const streamUrl = `http://${ip}:81/stream`;
+            const img = document.getElementById('stream');
+            const status = document.getElementById('status');
+            
+            status.textContent = 'Status: Connecting...';
+            status.style.color = '#ffcc00';
+            
+            img.onload = function() {
+                status.textContent = 'Status: ✓ Connected';
+                status.style.color = '#00ff88';
+            };
+            
+            img.onerror = function() {
+                status.textContent = 'Status: ✗ Failed - Check IP and try again';
+                status.style.color = '#ff4444';
+            };
+            
+            img.src = streamUrl;
+        }
+        
+        // Auto-connect if IP was saved
+        if (savedIp) {
+            setTimeout(connectStream, 500);
+        }
+    </script>
+</body>
+</html>
+

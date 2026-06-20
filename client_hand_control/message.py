@@ -23,11 +23,12 @@ class ControlMessage:
     Attributes:
         linear: Linear velocity in m/s (forward positive)
         angular: Angular velocity in rad/s (counter-clockwise positive)
-        enable: Whether drive is enabled (armed/running for the current mode)
+        enable: Whether drive is enabled (manual/offroad arming)
         mode: Optional drive mode ("onroad"=ADAS / "offroad"=manual)
+        run: Optional onroad autonomy start/stop flag
+        lane_change: Optional relative lane-change event ("left" / "right")
+        lane_seq: Optional monotonic counter; increments per new lane_change event
         estop: Optional emergency-stop flag (latched until re-arm)
-        lane_seq: Optional lane-change counter (increments per change event)
-        lane_dir: Optional last lane-change direction ("left" / "right")
         ts_ms: Timestamp in milliseconds (monotonic)
     """
     linear: float
@@ -35,20 +36,22 @@ class ControlMessage:
     enable: bool
     ts_ms: int
     mode: Optional[str] = None
-    estop: Optional[bool] = None
+    run: Optional[bool] = None
+    lane_change: Optional[str] = None
     lane_seq: Optional[int] = None
-    lane_dir: Optional[str] = None
+    estop: Optional[bool] = None
 
     def to_json(self) -> str:
         """Serialize to JSON string."""
         payload = asdict(self)
         # Drop optional keys that aren't set, so the wire payload stays lean and
-        # consumers that don't know a field simply never see it.
-        for key in ("mode", "estop", "lane_seq", "lane_dir"):
+        # consumers that don't know a field simply never see it. (lane_seq=0 is a
+        # real value and is kept — only None is dropped.)
+        for key in ("mode", "run", "lane_change", "lane_seq", "estop"):
             if payload.get(key) is None:
                 payload.pop(key, None)
         return json.dumps(payload)
-
+    
     @classmethod
     def from_json(cls, data: str) -> 'ControlMessage':
         """Deserialize from JSON string."""
@@ -56,6 +59,9 @@ class ControlMessage:
         estop = d.get("estop", None)
         if estop is not None:
             estop = bool(estop)
+        run = d.get("run", None)
+        if run is not None:
+            run = bool(run)
         lane_seq = d.get("lane_seq", None)
         if lane_seq is not None:
             lane_seq = int(lane_seq)
@@ -64,9 +70,10 @@ class ControlMessage:
             angular=float(d['angular']),
             enable=bool(d['enable']),
             mode=d.get("mode", None),
-            estop=estop,
+            run=run,
+            lane_change=d.get("lane_change", None),
             lane_seq=lane_seq,
-            lane_dir=d.get("lane_dir", None),
+            estop=estop,
             ts_ms=int(d['ts_ms']),
         )
     
@@ -169,20 +176,25 @@ class MessageValidator:
             logger.warning(f"Invalid message: mode={msg.mode} is not onroad/offroad")
             return False, "mode_not_valid"
 
-        if msg.estop is not None and not isinstance(msg.estop, bool):
+        if msg.run is not None and not isinstance(msg.run, bool):
             self._dropped_count += 1
-            logger.warning(f"Invalid message: estop={msg.estop} is not boolean")
-            return False, "estop_not_boolean"
+            logger.warning(f"Invalid message: run={msg.run} is not boolean")
+            return False, "run_not_boolean"
 
-        if msg.lane_dir is not None and msg.lane_dir not in ("keep", "left", "right"):
+        if msg.lane_change is not None and msg.lane_change not in ("left", "right"):
             self._dropped_count += 1
-            logger.warning(f"Invalid message: lane_dir={msg.lane_dir} is not keep/left/right")
-            return False, "lane_dir_not_valid"
+            logger.warning(f"Invalid message: lane_change={msg.lane_change} is not left/right")
+            return False, "lane_change_not_valid"
 
         if msg.lane_seq is not None and (not isinstance(msg.lane_seq, int) or msg.lane_seq < 0):
             self._dropped_count += 1
             logger.warning(f"Invalid message: lane_seq={msg.lane_seq} is not a non-negative int")
             return False, "lane_seq_not_valid"
+
+        if msg.estop is not None and not isinstance(msg.estop, bool):
+            self._dropped_count += 1
+            logger.warning(f"Invalid message: estop={msg.estop} is not boolean")
+            return False, "estop_not_boolean"
 
         # All checks passed
         self._last_ts = msg.ts_ms
@@ -208,12 +220,13 @@ class MessageValidator:
             angular=max(-self.max_angular, min(self.max_angular, msg.angular)),
             enable=msg.enable,
             mode=msg.mode,
-            estop=msg.estop,
+            run=msg.run,
+            lane_change=msg.lane_change,
             lane_seq=msg.lane_seq,
-            lane_dir=msg.lane_dir,
+            estop=msg.estop,
             ts_ms=msg.ts_ms,
         )
-        
+
         # Handle NaN/Inf by setting to zero
         if not math.isfinite(clamped.linear):
             clamped.linear = 0.0
@@ -244,9 +257,10 @@ def create_control_message(
     angular: float,
     enable: bool,
     mode: Optional[str] = None,
-    estop: Optional[bool] = None,
+    run: Optional[bool] = None,
+    lane_change: Optional[str] = None,
     lane_seq: Optional[int] = None,
-    lane_dir: Optional[str] = None,
+    estop: Optional[bool] = None,
 ) -> ControlMessage:
     """
     Create a control message with current timestamp.
@@ -256,9 +270,10 @@ def create_control_message(
         angular: Angular velocity in rad/s
         enable: Whether drive is enabled
         mode: Optional drive mode ("onroad"/"offroad")
+        run: Optional onroad autonomy start/stop flag
+        lane_change: Optional relative lane-change event ("left"/"right")
+        lane_seq: Optional monotonic lane-change counter
         estop: Optional emergency-stop flag
-        lane_seq: Optional lane-change counter
-        lane_dir: Optional last lane-change direction ("left"/"right")
 
     Returns:
         ControlMessage instance
@@ -268,9 +283,10 @@ def create_control_message(
         angular=angular,
         enable=enable,
         mode=mode,
-        estop=estop,
+        run=run,
+        lane_change=lane_change,
         lane_seq=lane_seq,
-        lane_dir=lane_dir,
+        estop=estop,
         ts_ms=int(time.monotonic() * 1000),
     )
 

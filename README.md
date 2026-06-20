@@ -6,17 +6,26 @@ This workspace is MQTT/WebSocket only (no ROS2).
 
 ## Architecture
 
-```
-Camera/RTSP -> Frame Gate -> MediaPipe -> Hand Control -> WebSocket
-                                              |
-                                              v
-                                    Server Gateway
-                                              |
-                                              v
-                                      MQTT (robot/cmd)
-                                              |
-                                              v
-                                            ESP32
+```mermaid
+flowchart TD
+    subgraph Client
+        A[Camera/RTSP] --> B[Frame Gate]
+        B --> C[MediaPipe]
+        C --> D[Hand Control]
+    end
+    
+    D -- "WebSocket" --> E
+    
+    subgraph Server
+        E[WS Server] --> F[MQTT Bridge]
+    end
+    
+    F -- "robot/cmd" --> G
+    
+    subgraph Robot
+        G[ESP32] -- UART --> H[Arduino]
+        H --> I[Motors]
+    end
 ```
 
 The server exposes:
