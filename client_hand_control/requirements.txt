@@ -8,6 +8,4 @@ opencv-python>=4.8.0
 # Hand detection
 mediapipe==0.10.21
 
-# MQTT publisher (client publishes control messages straight to the broker)
-paho-mqtt>=1.6
-
+# Transport: plain UDP datagrams to the rover. socket is stdlib, no dependency.

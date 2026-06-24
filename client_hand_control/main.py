@@ -3,14 +3,14 @@
 Hand Gesture Control Client - Main Entry Point
 
 This client runs on a user laptop, processes camera/RTSP frames locally
-with MediaPipe, and publishes validated JSON control messages straight to
-the MQTT broker (topic robot/cmd). The robot subscribes and acts.
+with MediaPipe, and fires validated JSON control messages straight at the
+rover as UDP datagrams. The rover (purePursuit.py) listens and acts.
 
-NO ROS2 DEPENDENCIES.
+NO ROS2 DEPENDENCIES. NO BROKER.
 
 Usage:
     python -m client_hand_control.main --camera 0 --preview
-    MQTT_BROKER=10.42.0.243 python -m client_hand_control.main --camera 0 --preview
+    ROBOT_IP=10.42.0.243 python -m client_hand_control.main --camera 0 --preview
 """
 
 import argparse
@@ -36,7 +36,7 @@ from .hand_control import (
 )
 from .gestures import GestureState
 from .message import ControlMessage, MessageValidator, create_control_message
-from .mqtt_publisher import MqttPublisher
+from .udp_publisher import UdpPublisher
 
 # Configure logging
 logging.basicConfig(
@@ -63,9 +63,8 @@ class HandControlClient:
     
     def __init__(
         self,
-        broker: str,
-        port: int = 1883,
-        topic: str = "robot/cmd",
+        host: str,
+        port: int = 5001,
         camera_index: int = 0,
         rtsp_url: Optional[str] = None,
         max_linear: float = 0.22,
@@ -78,9 +77,8 @@ class HandControlClient:
         Initialize the hand control client.
 
         Args:
-            broker: MQTT broker host/IP
-            port: MQTT broker port
-            topic: MQTT topic to publish control messages on
+            host: Rover IP/host to send UDP control datagrams to
+            port: Rover UDP port
             camera_index: Camera device index (used if rtsp_url is None)
             rtsp_url: RTSP stream URL (overrides camera_index if set)
             max_linear: Maximum linear velocity (m/s)
@@ -89,9 +87,8 @@ class HandControlClient:
             show_preview: Whether to show OpenCV preview window
             invalid_timeout_ms: Time before force-stop on invalid frames
         """
-        self.broker = broker
+        self.host = host
         self.port = port
-        self.topic = topic
         self.camera_index = camera_index
         self.rtsp_url = rtsp_url
         self.max_linear = max_linear
@@ -105,8 +102,8 @@ class HandControlClient:
         self.mp_gate = MediaPipeGate()
         self.drive_state = DriveState()
         self.gesture_state = GestureState()
-        self.validator = MessageValidator(max_linear=max_linear, max_angular=max_angular)
-        self.publisher: Optional[MqttPublisher] = None
+        self.validator = MessageValidator()
+        self.publisher: Optional[UdpPublisher] = None
         
         # Camera
         self.cap: Optional[cv2.VideoCapture] = None
@@ -141,8 +138,8 @@ class HandControlClient:
             min_tracking_confidence=0.5,
         )
         
-        # Initialize MQTT publisher (publishes straight to the broker)
-        self.publisher = MqttPublisher(self.broker, self.port, self.topic)
+        # Initialize UDP publisher (fires datagrams straight at the rover)
+        self.publisher = UdpPublisher(self.host, self.port)
         self.publisher.start()
 
         self._running = True
@@ -318,59 +315,21 @@ class HandControlClient:
             cv2.imshow("Hand Control Client", frame)
             
     async def _send_control_message(self, hands_ok: bool, lost_active: bool) -> None:
-        """Create, validate, and send a control message."""
-        # Determine if we should send enable=true
-        # Drive only enabled when: user toggled enable AND frame valid AND hands ok
-        can_enable = (
-            self.drive_state.enabled and
-            hands_ok and
-            not self.drive_state.calibrating and
-            self.drive_state.baseline is not None
-        )
-        
-        # If hands lost for too long, force disable
-        if lost_active:
-            can_enable = False
-            
-        # Get velocity commands
-        linear, angular = self.drive_state.get_velocity_commands(
-            self.max_linear, self.max_angular
-        )
-        
-        # If not enabled, zero the commands
-        if not can_enable:
-            linear = 0.0
-            angular = 0.0
+        """Create and send a control message. Just the run flag."""
+        # Send run=True only if gesture is active; otherwise omit (send False, actually, always send)
+        msg = create_control_message(run=self.gesture_state.run)
 
-        # E-stop override: while latched, force motion to zero and disable, on top
-        # of publishing the flag. Client-side effect — the raspi must honor estop
-        # too, but we don't wait for it to act.
-        if self.gesture_state.estop:
-            linear = 0.0
-            angular = 0.0
-            can_enable = False
-
-        # Create message
-        msg = create_control_message(
-            linear=linear,
-            angular=angular,
-            enable=can_enable,
-            mode=self.gesture_state.mode,
-            run=self.gesture_state.run,
-            lane_change=self.gesture_state.lane_change,
-            lane_seq=self.gesture_state.lane_seq,
-            estop=self.gesture_state.estop,
-        )
-        
-        # Validate message
+        # Validate (minimal validation)
         clamped_msg, valid, reason = self.validator.clamp_and_validate(msg)
-        
+
         if not valid:
             logger.warning(f"Message validation failed: {reason}")
             return
-            
+
         # Publish message
-        if self.publisher and self.publisher.publish(clamped_msg.to_json()):
+        json_str = clamped_msg.to_json()
+        logger.debug(f"Sending: {json_str}")
+        if self.publisher and self.publisher.publish(json_str):
             self._force_stop_sent = False
 
     async def _send_force_stop(self) -> None:
@@ -451,10 +410,11 @@ class HandControlClient:
             
         cv2.putText(frame, status, (20, 40), self.font, 0.9, color, 2)
         
-        # Broker connection status
-        conn_status = "Connected" if (self.publisher and self.publisher.connected) else "Disconnected"
-        conn_color = (0, 255, 0) if conn_status == "Connected" else (0, 0, 255)
-        cv2.putText(frame, f"Broker: {conn_status}", (20, 70), self.font, 0.5, conn_color, 1)
+        # UDP target status. Note: UDP is connectionless — "Ready" just means the
+        # socket is open, NOT that the rover is actually receiving. There's no ack.
+        conn_status = "Ready" if (self.publisher and self.publisher.connected) else "Down"
+        conn_color = (0, 255, 0) if conn_status == "Ready" else (0, 0, 255)
+        cv2.putText(frame, f"Robot {self.host}:{self.port} [{conn_status}]", (20, 70), self.font, 0.5, conn_color, 1)
 
         # Discrete-gesture state: mode / run / e-stop
         gs = self.gesture_state
@@ -536,9 +496,8 @@ class HandControlClient:
 async def main_async(args: argparse.Namespace) -> None:
     """Async main entry point."""
     client = HandControlClient(
-        broker=args.broker,
+        host=args.robot_ip,
         port=args.port,
-        topic=args.topic,
         camera_index=args.camera,
         rtsp_url=args.rtsp,
         max_linear=args.max_linear,
@@ -580,22 +539,16 @@ def main() -> None:
     )
     
     parser.add_argument(
-        "--broker",
+        "--robot-ip",
         type=str,
-        default=os.environ.get("MQTT_BROKER", "127.0.0.1"),
-        help="MQTT broker host/IP (env: MQTT_BROKER)",
+        default=os.environ.get("ROBOT_IP", "127.0.0.1"),
+        help="Rover IP/host to send UDP control datagrams to (env: ROBOT_IP)",
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("MQTT_PORT", "1883")),
-        help="MQTT broker port",
-    )
-    parser.add_argument(
-        "--topic",
-        type=str,
-        default="robot/cmd",
-        help="MQTT topic to publish control messages on",
+        default=int(os.environ.get("ROBOT_PORT", "5001")),
+        help="Rover UDP port (env: ROBOT_PORT)",
     )
     parser.add_argument(
         "--camera",
