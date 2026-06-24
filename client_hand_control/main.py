@@ -25,6 +25,7 @@ from typing import Optional
 import cv2
 import mediapipe as mp
 import numpy as np
+from pynput import keyboard
 
 from .frame_gate import FrameGate, MediaPipeGate
 from .hand_control import (
@@ -120,7 +121,63 @@ class HandControlClient:
 
         # UI font
         self.font = cv2.FONT_HERSHEY_SIMPLEX
-        
+
+        # Keyboard state
+        self._keyboard_listener = None
+        self._last_key_pressed = None
+        self._lane_left_armed = False
+        self._lane_right_armed = False
+
+    def _on_key_press(self, key):
+        """Handle keyboard input (non-blocking via pynput)."""
+        try:
+            self._last_key_pressed = str(key).replace("Key.", "").replace("'", "")
+
+            if key == keyboard.Key.enter:
+                self._send_raw_command("MODE_TOGGLE")
+            elif key == keyboard.Key.space:
+                self._send_raw_command("ESTOP")
+            elif key == keyboard.Key.up:
+                self._lane_left_armed = True
+            elif key == keyboard.Key.down:
+                self._lane_right_armed = True
+            elif key == keyboard.Key.left:
+                self._send_raw_command("CMD_A")
+            elif key == keyboard.Key.right:
+                self._send_raw_command("CMD_D")
+            else:
+                # Check character keys (WASD)
+                char = key.char if hasattr(key, 'char') else None
+                if char == 'w':
+                    self._send_raw_command("CMD_W")
+                elif char == 'a':
+                    self._send_raw_command("CMD_A")
+                elif char == 's':
+                    self._send_raw_command("CMD_S")
+                elif char == 'd':
+                    self._send_raw_command("CMD_D")
+        except AttributeError:
+            pass
+
+    def _on_key_release(self, key):
+        """Detect lane change on key release (edge-triggered)."""
+        try:
+            if key == keyboard.Key.up and self._lane_left_armed:
+                self._send_raw_command("LANE_LEFT")
+                self._lane_left_armed = False
+            elif key == keyboard.Key.down and self._lane_right_armed:
+                self._send_raw_command("LANE_RIGHT")
+                self._lane_right_armed = False
+            self._last_key_pressed = None
+        except AttributeError:
+            pass
+
+    def _send_raw_command(self, cmd: str):
+        """Send a raw command string directly to the rover."""
+        if self.publisher:
+            self.publisher.publish(cmd)
+            logger.debug(f"KB: {cmd}")
+
     async def start(self) -> None:
         """Start the client."""
         logger.info("Starting Hand Control Client...")
@@ -142,6 +199,13 @@ class HandControlClient:
         self.publisher = UdpPublisher(self.host, self.port)
         self.publisher.start()
 
+        # Start keyboard listener
+        self._keyboard_listener = keyboard.Listener(
+            on_press=self._on_key_press,
+            on_release=self._on_key_release
+        )
+        self._keyboard_listener.start()
+
         self._running = True
         logger.info("Hand Control Client started")
 
@@ -149,6 +213,10 @@ class HandControlClient:
         """Stop the client and clean up resources."""
         logger.info("Stopping Hand Control Client...")
         self._running = False
+
+        # Stop keyboard listener
+        if self._keyboard_listener:
+            self._keyboard_listener.stop()
 
         # Send a final STOP, then shut the publisher down.
         if self.publisher:
@@ -159,16 +227,16 @@ class HandControlClient:
         if self.cap:
             self.cap.release()
             self.cap = None
-            
+
         # Clean up MediaPipe
         if self.hands:
             self.hands.close()
             self.hands = None
-            
+
         # Clean up OpenCV windows
         if self.show_preview:
             cv2.destroyAllWindows()
-            
+
         logger.info("Hand Control Client stopped")
         
     async def run(self) -> None:
@@ -416,18 +484,35 @@ class HandControlClient:
         conn_color = (0, 255, 0) if conn_status == "Ready" else (0, 0, 255)
         cv2.putText(frame, f"Robot {self.host}:{self.port} [{conn_status}]", (20, 70), self.font, 0.5, conn_color, 1)
 
-        # Discrete-gesture state: mode / run / e-stop
+        # Discrete-gesture state: mode / run / lane / e-stop
         gs = self.gesture_state
         mode_color = (0, 200, 255) if gs.mode == "onroad" else (180, 180, 180)
         cv2.putText(frame, f"Mode: {gs.mode.upper()}", (20, 100), self.font, 0.5, mode_color, 1)
+
         run_color = (0, 255, 0) if gs.run else (0, 0, 255)
         cv2.putText(frame, f"RUN: {'ON' if gs.run else 'OFF'}", (20, 125), self.font, 0.5, run_color, 1)
+
+        # Lane change state
+        if gs.lane_change:
+            lane_text = f"Lane: {gs.lane_change.upper()} (seq={gs.lane_seq})"
+            cv2.putText(frame, lane_text, (20, 145), self.font, 0.5, (255, 200, 0), 1)
+
         if gs.estop:
             # Loud, centered banner — this is the one you must not miss.
             cv2.putText(frame, "*** E-STOP ***", (w // 2 - 120, 50), self.font, 1.0, (0, 0, 255), 3)
+
         if gs.last_event:
-            cv2.putText(frame, gs.last_event, (20, 150), self.font, 0.5, (0, 255, 0), 1)
+            cv2.putText(frame, gs.last_event, (20, 170), self.font, 0.5, (0, 255, 0), 1)
         
+        # Keyboard display
+        if self._last_key_pressed:
+            cv2.putText(
+                frame,
+                f"Key: {self._last_key_pressed}",
+                (20, h - 160),
+                self.font, 0.7, (255, 165, 0), 2
+            )
+
         # Command display
         linear, angular = self.drive_state.get_velocity_commands(self.max_linear, self.max_angular)
         cv2.putText(
